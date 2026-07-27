@@ -140,6 +140,14 @@ below), and which entry to keep:
 python3 ~/.claude/hooks/notify.py --doctor
 ```
 
+Upgrading from a version before 1.7.0? Those banners hold a baked-in link that
+this version would not have attached, and a delivered notification cannot be
+rewritten. Clear them once:
+
+```bash
+python3 ~/.claude/hooks/notify.py --clear-banners
+```
+
 ### Turn it down
 
 Three environment variables, no config file needed:
@@ -151,7 +159,7 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
 | `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier`. **Try this first if you see no notifications at all** — a bundle id macOS has not authorized is dropped silently |
 | `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump entirely |
-| `CC_NOTIFY_ALWAYS_DEEPLINK=1` | Always attach a click target, accepting that some clicks add a session row |
+| `CC_NOTIFY_ALWAYS_DEEPLINK=1` | Always navigate on click, accepting that some clicks add a session row |
 
 Per-session grouping means a chatty session replaces its own banner rather than
 stacking, so turn-end notifications stay bounded at one per session.
@@ -236,20 +244,25 @@ doesn't match.
 > and archive the other one. Every future click resolves there, leaving one
 > correctly-named row.
 >
-> **So the click target is withheld when it would litter.** If clicking a given
-> session's notification would create that second row, the banner ships without
-> a link — it still tells you which session wants you, which is the main job.
-> Litter is worse than a missing click, especially since you cannot un-litter:
-> archiving the extra row is undone by the next click.
+> **So the click is resolved when you click it, not when it is posted.** The
+> banner carries a command rather than a URL (`-execute`, not `-open`), and that
+> command re-checks the current state at the moment of the click: navigate if
+> that adds no row, otherwise just raise the app and let you pick the session.
+> Either way you get to Claude; you only lose the jump when taking it would
+> litter.
 >
-> This is **self-healing**. Converge a session once — name its `local_<uuid>`
-> entry, archive the other, as `--doctor` explains — and click-to-jump returns
-> for it automatically, because clicking then merely navigates. Sessions the app
-> already lists as `local_<uuid>` have working clicks from the start.
+> Deciding at post time cannot work, and that is the whole point. A banner
+> outlives the state it was posted under — sitting in Notification Center for a
+> day, still holding yesterday's answer, still one click from acting on it.
+> Clicking an old banner was exactly how this resurfaced after it was
+> "fixed".
+>
+> It is also **self-healing**. Converge a session once — name its `local_<uuid>`
+> entry, archive the other, as `--doctor` explains — and its click-to-jump comes
+> back, *including on banners posted before you converged it*.
 >
 > `python3 notify.py --doctor` lists what is still un-converged.
-> `CC_NOTIFY_ALWAYS_DEEPLINK=1` restores clicking everywhere if you would rather
-> have the jump and tolerate the rows.
+> `CC_NOTIFY_ALWAYS_DEEPLINK=1` always navigates, rows and all.
 >
 > This was originally documented here as "verified idempotent". That was wrong,
 > and wrong in an instructive way: the test only ever fired at a session whose

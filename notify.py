@@ -50,7 +50,7 @@ network-shaped string in this file is a `claude://` URL handed to the OS.
 
 MIT licensed. https://github.com/hancheng-ai/cc-notify
 """
-import sys, json, os, re, plistlib, shutil, subprocess
+import sys, json, os, re, shlex, plistlib, shutil, subprocess
 from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_attr
 
 IS_MAC = sys.platform == "darwin"
@@ -436,6 +436,58 @@ def user_is_watching(session_id):
 # desktop session. The runners below are thin wrappers around these.
 # --------------------------------------------------------------------------
 
+def click_command(url):
+    """Shell command to run on click, so the safety check uses CURRENT state.
+
+    `-open URL` bakes its decision in at post time, and banners outlive that
+    decision by days: one posted while a session was un-converged still carries
+    that answer long after the session converged, and - worse - a banner posted
+    by an older version carries a link this version would never have attached.
+    Notification Center is effectively a cache of stale decisions.
+
+    So the click routes back through this script, which re-runs the check at the
+    moment of the click. See open_url().
+
+    The interpreter is pinned to /usr/bin/python3 rather than sys.executable,
+    because sys.executable resolves through PATH to whatever toolchain is
+    active - often Xcode's - and that path is baked into every delivered
+    banner. Move or update Xcode and yesterday's notifications stop responding
+    to clicks. The system shim outlives toolchains.
+    """
+    py = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+    return "{} {} --open {}".format(
+        shlex.quote(py),
+        shlex.quote(os.path.abspath(__file__)),
+        shlex.quote(url))
+
+
+def open_url(url):
+    """Click handler: navigate if that is safe right now, else just focus Claude.
+
+    Deliberately degrades rather than doing nothing. A click that cannot safely
+    navigate still brings the app forward - the user wanted to get to Claude -
+    it just leaves them to pick the session, instead of minting a row.
+
+    The bare `claude://` is what raises the app, measured. `open -b <bundle>`,
+    `open -a`, and AppleScript `activate` all return success and leave the app
+    exactly where it was, which is why none of them is used here.
+    """
+    m = re.match(r"^claude://resume\?session=([0-9a-fA-F-]{36})$", url or "")
+    if not m:
+        return 0  # only ever open our own scheme, never arbitrary input
+    sid = m.group(1)
+    if not UUID_RE.match(sid):
+        return 0
+    safe = not would_duplicate(sid) or os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK")
+    argv = ["/usr/bin/open", url if safe else "claude://"]
+    try:
+        subprocess.run(argv, timeout=10,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return 0
+
+
 def macos_argv(tn, title, sub, msg, url, group):
     """terminal-notifier invocation. Click-to-jump and grouping both supported.
 
@@ -443,12 +495,16 @@ def macos_argv(tn, title, sub, msg, url, group):
     so it bought nothing while costing an icon conversion on every notification.
     The banner's icon comes from the sending bundle instead - see the notifier
     identity section above.
+
+    The click is wired with `-execute`, not `-open`, so the duplicate check runs
+    when the banner is clicked rather than when it was posted - see
+    click_command().
     """
     argv = [tn, "-title", title, "-message", msg]
     if sub:
         argv += ["-subtitle", sub]
     if url:
-        argv += ["-open", url]
+        argv += ["-execute", click_command(url)]
     if group:
         argv += ["-group", group]  # replaces this session's previous banner
     return argv
@@ -709,17 +765,10 @@ def build(d):
 
     if url and os.environ.get("CC_NOTIFY_NO_DEEPLINK"):
         url = None  # click-to-jump off entirely
-    elif url and would_duplicate(sid) and not os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK"):
-        # Clicking this one would mint a second, untitled row for a conversation
-        # the app already lists. Litter is worse than a missing click: the banner
-        # still tells you which session wants you, which is the main job.
-        #
-        # Self-healing on purpose. Converge that session once - name the
-        # local_<uuid> entry, archive the other, as `--doctor` explains - and the
-        # link comes back for it automatically, because clicking then merely
-        # navigates. CC_NOTIFY_ALWAYS_DEEPLINK=1 restores the old behaviour for
-        # anyone who would rather have the click and tolerate the extra rows.
-        url = None
+
+    # Note what is NOT decided here. Whether following this link would mint a
+    # second row is deliberately left to click time, because a banner outlives
+    # the state it was posted under. open_url() answers it at the click.
     return title, sub, msg, url, (sid or None)
 
 
@@ -831,11 +880,36 @@ def doctor():
     return 0
 
 
+def clear_banners():
+    """Drop our banners from Notification Center.
+
+    Needed once, when upgrading from a version that used `-open`: those banners
+    carry a baked-in link this version would not have attached, and there is no
+    way to rewrite a delivered notification. Removing them is the only cure.
+    """
+    if not IS_MAC:
+        print("Only needed on macOS.")
+        return 0
+    tn = _first_executable(TN_PATHS, "terminal-notifier")
+    if not tn:
+        print("terminal-notifier not found; clear Notification Center by hand.")
+        return 1
+    for binary in filter(None, (rebadged_notifier(tn), tn)):
+        _run([binary, "-remove", "ALL"])
+    print("Cleared. Banners posted from now on resolve their link at click time.")
+    return 0
+
+
 def main():
     if "--doctor" in sys.argv:
         return doctor()
     if "--self-test" in sys.argv:
         return self_test()
+    if "--clear-banners" in sys.argv:
+        return clear_banners()
+    if "--open" in sys.argv:
+        i = sys.argv.index("--open")
+        return open_url(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
     try:
         d = json.load(sys.stdin)
         if not isinstance(d, dict):

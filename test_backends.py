@@ -156,9 +156,15 @@ class MacBackend(unittest.TestCase):
         a = N.macos_argv("/tn", "Title", "repo · plan", "msg", LINK, UUID)
         self.assertEqual(a[0], "/tn")
         for flag, val in (("-title", "Title"), ("-subtitle", "repo · plan"),
-                          ("-message", "msg"), ("-open", LINK), ("-group", UUID)):
+                          ("-message", "msg"), ("-group", UUID)):
             self.assertIn(flag, a)
             self.assertEqual(a[a.index(flag) + 1], val)
+        # The click routes through this script rather than opening the URL
+        # directly, so the duplicate check runs at click time, not post time.
+        self.assertNotIn("-open", a)
+        self.assertIn("-execute", a)
+        self.assertIn(LINK, a[a.index("-execute") + 1])
+        self.assertIn("--open", a[a.index("-execute") + 1])
 
     def test_appicon_is_not_used(self):
         """Current macOS accepts -appIcon and then ignores it, so sending it
@@ -543,28 +549,67 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
         for v in ("CC_NOTIFY_NO_DEEPLINK", "CC_NOTIFY_ALWAYS_DEEPLINK"):
             os.environ.pop(v, None)
 
-    def test_no_link_when_clicking_would_add_a_row(self):
-        N.would_duplicate = lambda sid: True
-        self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
+    def test_link_is_attached_regardless_of_current_state(self):
+        """The banner always carries a click target now.
 
-    def test_link_present_once_the_session_is_converged(self):
-        """Self-healing: converge a session and its click-to-jump returns."""
-        N.would_duplicate = lambda sid: False
+        Whether following it is safe is decided when it is clicked, because a
+        banner outlives the state it was posted under."""
+        N.would_duplicate = lambda sid: True
         self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
+
+    def test_click_focuses_the_app_when_navigating_would_add_a_row(self):
+        """Bare claude:// raises the app without importing a session. Measured:
+        open -b / open -a / AppleScript activate all no-op on this app."""
+        N.would_duplicate = lambda sid: True
+        self.assertEqual(self.click(LINK), ["/usr/bin/open", "claude://"])
+
+    def test_click_command_pins_a_stable_interpreter(self):
+        """sys.executable can be Xcode's python3, whose path is baked into every
+        delivered banner and dies when Xcode moves."""
+        cmd = N.click_command(LINK)
+        self.assertTrue(cmd.startswith("/usr/bin/python3 "), cmd)
+        self.assertNotIn("Xcode", cmd)
+
+    def test_click_command_quotes_its_arguments(self):
+        self.assertIn("'%s'" % LINK, N.click_command(LINK))
+
+    def test_click_navigates_once_the_session_is_converged(self):
+        """Self-healing: converge a session and its click-to-jump returns -
+        including for banners posted back when it was not converged."""
+        N.would_duplicate = lambda sid: False
+        self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
 
     def test_always_deeplink_overrides_the_guard(self):
         N.would_duplicate = lambda sid: True
         os.environ["CC_NOTIFY_ALWAYS_DEEPLINK"] = "1"
         self.addCleanup(os.environ.pop, "CC_NOTIFY_ALWAYS_DEEPLINK", None)
-        self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
+        self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
 
-    def test_no_deeplink_still_wins_over_always(self):
+    def test_no_deeplink_still_removes_the_target_entirely(self):
         N.would_duplicate = lambda sid: False
         os.environ["CC_NOTIFY_NO_DEEPLINK"] = "1"
-        os.environ["CC_NOTIFY_ALWAYS_DEEPLINK"] = "1"
         self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_DEEPLINK", None)
-        self.addCleanup(os.environ.pop, "CC_NOTIFY_ALWAYS_DEEPLINK", None)
         self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
+
+    def test_click_refuses_anything_but_our_own_scheme(self):
+        """The handler is reachable from a delivered notification, so it must
+        never be a general-purpose opener."""
+        N.would_duplicate = lambda sid: False
+        for hostile in ("file:///etc/passwd", "https://evil.test",
+                        "claude://resume?session=../../x", "",
+                        "claude://resume?session=%s&x=1" % UUID):
+            self.assertIsNone(self.click(hostile), hostile)
+
+    def click(self, url):
+        """Run the click handler, returning the argv it would have run."""
+        seen = []
+        real = N.subprocess.run
+        N.subprocess.run = lambda argv, **kw: seen.append(argv)
+        try:
+            N.open_url(url)
+        finally:
+            N.subprocess.run = real
+        return seen[0] if seen else None
 
 
 def setattr_all(mod, plat):
