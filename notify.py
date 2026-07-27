@@ -232,12 +232,12 @@ def rebadged_notifier(tn_binary):
     Returns None on any problem, so the caller simply falls back to the shared
     terminal-notifier - a wrong icon is much better than no notification.
     """
-    # OPT-IN, deliberately. A re-badged bundle posts under a bundle id macOS has
-    # never authorized for notifications, and an unauthorized sender can be
-    # dropped silently - which is the one failure this tool must never have. A
-    # wrong icon is cosmetic; missing notifications are not. Enable with
-    # CC_NOTIFY_REBADGE=1 once you have confirmed banners still appear.
-    if not IS_MAC or not os.environ.get("CC_NOTIFY_REBADGE"):
+    # On by default, having been verified to post and display without any
+    # authorization prompt. The residual risk is that a fresh bundle id is a
+    # sender macOS has not seen before, so if a machine ever refuses it the
+    # symptom is silence - CC_NOTIFY_NO_REBADGE=1 is the first thing --doctor
+    # tells you to try.
+    if not IS_MAC or os.environ.get("CC_NOTIFY_NO_REBADGE"):
         return None
     app = os.path.join(_rebadge_home(), "cc-notify.app")
     binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
@@ -767,6 +767,19 @@ def doctor():
     if not IS_MAC:
         print("Duplicate session entries are a macOS desktop-app concern only.")
         return 0
+    tn = _first_executable(TN_PATHS, "terminal-notifier")
+    ours = rebadged_notifier(tn) if tn else None
+    print("notifier identity")
+    if ours:
+        print(f"  posting as {REBADGE_ID} (own icon, own Notification Center group)")
+        print("  Seeing NO notifications at all? That is the first thing to suspect -")
+        print("  a bundle id macOS has not authorized is dropped silently. Compare with")
+        print("      CC_NOTIFY_NO_REBADGE=1 python3 notify.py --self-test")
+        print("  and if that one arrives while the default does not, keep the variable set.")
+    else:
+        print("  posting as the shared terminal-notifier (re-badge off or unavailable)")
+    print()
+
     pairs = duplicate_pairs()
     if not pairs:
         print("No duplicate session entries found.")

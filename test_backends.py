@@ -566,10 +566,11 @@ class RebadgedNotifier(unittest.TestCase):
             else:
                 os.environ.pop("CLAUDE_PLUGIN_DATA", None)
 
-    def test_rebadge_is_off_unless_explicitly_enabled(self):
-        """Opt-in: an unauthorized bundle id can have its notifications dropped
-        silently, which is the one failure this tool must never have."""
-        os.environ.pop("CC_NOTIFY_REBADGE", None)
+    def test_rebadge_can_be_disabled(self):
+        """Escape hatch: if a machine refuses the new bundle id the symptom is
+        silence, so turning it off must always be possible."""
+        os.environ["CC_NOTIFY_NO_REBADGE"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_REBADGE", None)
         self.assertIsNone(N.rebadged_notifier("/usr/local/bin/terminal-notifier"))
 
     def test_rebadge_falls_back_when_source_bundle_is_missing(self):
@@ -591,8 +592,6 @@ class RebadgedNotifier(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old = os.environ.get("CLAUDE_PLUGIN_DATA")
             os.environ["CLAUDE_PLUGIN_DATA"] = tmp
-            os.environ["CC_NOTIFY_REBADGE"] = "1"  # feature is opt-in
-            self.addCleanup(os.environ.pop, "CC_NOTIFY_REBADGE", None)
             try:
                 binary = os.path.join(tmp, "notifier", "cc-notify.app",
                                       "Contents", "MacOS", "terminal-notifier")

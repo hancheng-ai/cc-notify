@@ -50,7 +50,7 @@ are never suppressed, since a wrong guess there would leave a session hanging.
 | One live banner per session | ✅ | ✅ | ✅ |
 | Click to jump to the session | ✅ | ➖ | ⚠️ |
 | Quiet when you're watching | ✅ | ➖ | ➖ |
-| Own icon + Notification Center group | opt-in | ➖ | ➖ |
+| Own icon + Notification Center group | ✅ | ➖ | ➖ |
 | Backend | `terminal-notifier`, falling back to `osascript` | `notify-send` | PowerShell toast |
 | Verified on real hardware | ✅ | ⚠️ | ⚠️ |
 
@@ -149,7 +149,7 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_NO_TURN_END=1` | Stop notifying when turns finish or fail; keep permission and idle prompts |
 | `CC_NOTIFY_NO_SUPPRESS=1` | Always notify, even for the session you're looking at |
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
-| `CC_NOTIFY_REBADGE=1` | **Opt in** to posting under our own icon and Notification Center group. Off by default: the new bundle id is unauthorized until macOS says otherwise, and an unauthorized sender can be dropped silently |
+| `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier`. **Try this first if you see no notifications at all** — a bundle id macOS has not authorized is dropped silently |
 | `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump, so clicking can never add a session entry |
 
 Per-session grouping means a chatty session replaces its own banner rather than
@@ -266,10 +266,16 @@ the wrong identity. That build costs ~2s once; later notifications reuse it and
 run in ~0.3s. If anything about it fails, it silently falls back to the shared
 notifier — a wrong icon beats no notification.
 
-**This is off by default.** A fresh bundle id has no notification authorization, and
-an unauthorized sender can be dropped silently — the one failure mode this tool
-cannot have. Set `CC_NOTIFY_REBADGE=1` to enable it, then confirm banners still
-appear before relying on it.
+Verified to post and display with no authorization prompt. The residual risk is
+that a fresh bundle id is a sender your Mac has never seen, so if a machine ever
+refuses it the symptom is silence — `CC_NOTIFY_NO_REBADGE=1` turns it off, and
+`--doctor` names it as the first thing to suspect when nothing arrives.
+
+The Notification Center group is titled **cc-notify** (the bundle's
+`CFBundleName`), while the icon is the app that launched the session. That split
+is deliberate: the icon says which product the banner concerns, the name says
+which tool produced it — calling the group "Claude Code" would make these
+indistinguishable from the app's own notifications.
 
 Some smaller decisions worth knowing:
 
