@@ -465,6 +465,68 @@ class PluginPackaging(unittest.TestCase):
         self.assertFalse(os.path.exists(stray))
 
 
+class DuplicateSessionEntries(unittest.TestCase):
+    """Clicking imports a session as local_<uuid>. If the app already tracked
+    that conversation under another id, a second row appears. One-time per
+    session, and archiving it does not stick - the next click un-archives it."""
+
+    def setUp(self):
+        self._real = N.desktop_records
+        self.addCleanup(setattr, N, "desktop_records", self._real)
+
+    def _records(self, pairs):
+        N.desktop_records = lambda: [(sid, cli, {}) for sid, cli in pairs]
+
+    def test_no_duplicate_when_the_canonical_entry_is_the_only_one(self):
+        self._records([(f"local_{UUID}", UUID)])
+        self.assertFalse(N.would_duplicate(UUID))
+
+    def test_duplicate_when_tracked_under_a_native_id(self):
+        self._records([("local_deadbeef-0000-4000-8000-000000000000", UUID)])
+        self.assertTrue(N.would_duplicate(UUID))
+
+    def test_no_duplicate_for_a_session_the_app_does_not_track(self):
+        """A fresh CLI session: the import creates its first entry, not a second."""
+        self._records([])
+        self.assertFalse(N.would_duplicate(UUID))
+
+    def test_pairs_identify_canonical_and_extras(self):
+        native = "local_deadbeef-0000-4000-8000-000000000000"
+        self._records([(f"local_{UUID}", UUID), (native, UUID)])
+        (cli, canonical, others), = N.duplicate_pairs()
+        self.assertEqual(cli, UUID)
+        self.assertEqual(canonical, f"local_{UUID}")
+        self.assertEqual(others, [native])
+
+    def test_single_entry_is_not_reported_as_a_pair(self):
+        self._records([(f"local_{UUID}", UUID)])
+        self.assertEqual(N.duplicate_pairs(), [])
+
+    def test_pair_without_a_canonical_entry_yet(self):
+        a = "local_aaaaaaaa-0000-4000-8000-000000000000"
+        b = "local_bbbbbbbb-0000-4000-8000-000000000000"
+        self._records([(a, UUID), (b, UUID)])
+        (_, canonical, others), = N.duplicate_pairs()
+        self.assertIsNone(canonical)
+        self.assertCountEqual(others, [a, b])
+
+
+class DeepLinkOptOut(unittest.TestCase):
+    def test_no_deeplink_env_removes_the_click_target(self):
+        os.environ["CC_NOTIFY_NO_DEEPLINK"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_DEEPLINK", None)
+        self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
+
+    def test_deeplink_present_by_default(self):
+        os.environ.pop("CC_NOTIFY_NO_DEEPLINK", None)
+        old = (N.IS_MAC, N.IS_WIN, N.IS_LINUX)
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        try:
+            self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
+        finally:
+            N.IS_MAC, N.IS_WIN, N.IS_LINUX = old
+
+
 class SubprocessSafety(unittest.TestCase):
     def test_a_lingering_grandchild_cannot_defeat_the_timeout(self):
         """A notifier that leaves a helper holding the inherited pipe must not

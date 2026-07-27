@@ -332,6 +332,64 @@ def foreground_session():
     return best_id
 
 
+def desktop_records():
+    """Every desktop session record, as (sessionId, cliSessionId, dict)."""
+    out = []
+    try:
+        for dirpath, _, names in os.walk(SESSION_STORE):
+            for n in names:
+                if not (n.startswith("local_") and n.endswith(".json")):
+                    continue
+                try:
+                    with open(os.path.join(dirpath, n), encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                sid, cli = d.get("sessionId"), d.get("cliSessionId")
+                if sid and cli:
+                    out.append((sid, cli, d))
+    except Exception:
+        pass
+    return out
+
+
+def would_duplicate(session_id):
+    """True if clicking a link for this session would add a row to the session list.
+
+    The deep link imports a CLI session as `local_<uuid>`. When the desktop app
+    already tracks that conversation under a natively-generated id instead, the
+    import produces a SECOND entry for the same conversation.
+
+    This is a one-time cost per session, not per click - once `local_<uuid>`
+    exists, later clicks log "already imported" and add nothing. Archiving that
+    entry does not help either: the next click un-archives it.
+    """
+    if not IS_MAC or not session_id:
+        return False
+    canonical = f"local_{session_id}"
+    same = [sid for sid, cli, _ in desktop_records() if cli == session_id]
+    return bool(same) and canonical not in same
+
+
+def duplicate_pairs():
+    """Conversations tracked under more than one desktop entry.
+
+    Returns (cliSessionId, canonical_id_or_None, [other_ids]).
+    """
+    by_cli = {}
+    for sid, cli, d in desktop_records():
+        by_cli.setdefault(cli, []).append((sid, d))
+    pairs = []
+    for cli, entries in by_cli.items():
+        if len(entries) < 2:
+            continue
+        canonical = f"local_{cli}"
+        ids = [sid for sid, _ in entries]
+        pairs.append((cli, canonical if canonical in ids else None,
+                      [i for i in ids if i != canonical]))
+    return pairs
+
+
 def user_is_watching(session_id):
     """True only when THIS session can be established as the one on screen.
 
@@ -628,6 +686,10 @@ def build(d):
     sid = str(d.get("session_id") or "")
     url = (f"claude://resume?session={sid}"
            if UUID_RE.match(sid) and deep_link_supported() else None)
+    # Opt out of click-to-jump entirely, for anyone who would rather keep their
+    # session list pristine than be able to click through to a session.
+    if os.environ.get("CC_NOTIFY_NO_DEEPLINK"):
+        url = None
     return title, sub, msg, url, (sid or None)
 
 
@@ -688,7 +750,45 @@ def self_test():
     return 0
 
 
+def doctor():
+    """Report duplicate session entries and how to converge each pair.
+
+    Clicking a notification imports the CLI session as `local_<uuid>`. If the
+    desktop app already tracked that conversation under a different id, you end
+    up with two rows for one conversation. Archiving the extra one is futile -
+    the next click un-archives it - so the durable fix is to converge on the
+    `local_<uuid>` entry, which every future click resolves to.
+    """
+    if not IS_MAC:
+        print("Duplicate session entries are a macOS desktop-app concern only.")
+        return 0
+    pairs = duplicate_pairs()
+    if not pairs:
+        print("No duplicate session entries found.")
+        return 0
+
+    print(f"{len(pairs)} conversation(s) tracked under more than one session entry.\n")
+    print("Clicking a notification imports a session as local_<uuid>. When the app already")
+    print("tracked that conversation under another id, you get a second row for it.")
+    print("Archiving the extra row does NOT stick - the next click un-archives it.\n")
+    for cli, canonical, others in pairs:
+        print(f"conversation {cli}")
+        print(f"  canonical (click always lands here) : {canonical or '(not created yet)'}")
+        for o in others:
+            print(f"  also listed as                      : {o}")
+        if canonical:
+            print("  fix: give the canonical entry the name you want, then archive the other(s).")
+            print("       History is shared - both point at the same transcript - so nothing is lost.")
+        else:
+            print("  no canonical entry yet; it will appear the first time you click.")
+        print()
+    print("Prefer no click-to-jump at all?  export CC_NOTIFY_NO_DEEPLINK=1")
+    return 0
+
+
 def main():
+    if "--doctor" in sys.argv:
+        return doctor()
     if "--self-test" in sys.argv:
         return self_test()
     try:

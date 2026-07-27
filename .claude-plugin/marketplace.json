@@ -9,7 +9,7 @@
     {
       "name": "cc-notify",
       "description": "Know which Claude Code session needs you, and click to jump straight back. Session-aware, clickable desktop notifications.",
-      "version": "1.3.2",
+      "version": "1.4.0",
       "author": {
         "name": "Hancheng Wang"
       },

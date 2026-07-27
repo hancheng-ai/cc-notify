@@ -130,6 +130,13 @@ Restart Claude Code, then check it end to end:
 python3 ~/.claude/hooks/notify.py --self-test
 ```
 
+And to check whether any conversation is listed twice (see the deep-link caveat
+below), plus which entry to keep:
+
+```bash
+python3 ~/.claude/hooks/notify.py --doctor
+```
+
 That prints what it resolved — platform, session, title, deep link, backend and
 notifier identity — and sends a real notification for your most recent session.
 
@@ -143,6 +150,7 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_NO_SUPPRESS=1` | Always notify, even for the session you're looking at |
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
 | `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier` instead of building our own identity |
+| `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump, so clicking can never add a session entry |
 
 Per-session grouping means a chatty session replaces its own banner rather than
 stacking, so turn-end notifications stay bounded at one per session.
@@ -212,19 +220,29 @@ session named `local_<uuid>` and navigates there. The session id is checked
 against a UUID pattern first, because the app silently discards anything that
 doesn't match.
 
-> **Known caveat — it can duplicate a session entry.** If the CLI session
-> already has a desktop session under a *different* id, importing creates a
-> **second** entry in your session list pointing at the same conversation.
-> Clicks after that are idempotent, because `local_<uuid>` is deterministic — but
-> that first click leaves a duplicate behind. Conversation history is not
-> affected; the extra entry is a second view, and archiving it is safe once you
-> have confirmed which of the pair is the original (compare `createdAt` in
-> `~/Library/Application Support/Claude/claude-code-sessions/`; the duplicate is
-> the one named `local_<cliSessionId>`).
+> **Known caveat — the first click can add a session entry.** If the desktop app
+> already tracks that conversation under a natively-generated id, the import
+> creates a **second** row pointing at the same conversation.
 >
-> This was originally documented here as "verified idempotent". That was wrong:
-> the test only ever fired at a session whose desktop record the test itself had
-> created, and never at one that already had a record by another route.
+> It is a **one-time cost per session**, not per click: once `local_<uuid>`
+> exists, later clicks log *"already imported"* and add nothing. Sessions the app
+> already lists as `local_<uuid>` never duplicate at all. History is never
+> affected — both rows point at the same transcript.
+>
+> **Archiving the extra row does not stick.** The next click un-archives it
+> (measured: `isArchived` flips back to `false`). So the durable fix is to
+> *converge* rather than clean: give the `local_<uuid>` entry the name you want
+> and archive the other one. Every future click resolves there, leaving one
+> correctly-named row.
+>
+> `python3 notify.py --doctor` finds these pairs for you and prints which entry
+> to keep. `CC_NOTIFY_NO_DEEPLINK=1` drops click-to-jump entirely if you would
+> rather have a pristine session list.
+>
+> This was originally documented here as "verified idempotent". That was wrong,
+> and wrong in an instructive way: the test only ever fired at a session whose
+> record the test itself had just created, then generalised from "no third row
+> appeared" to "never duplicates".
 
 **On macOS it posts under its own identity.** macOS takes a banner's icon — and
 its Notification Center grouping — from the *sending* application, so every tool
@@ -292,7 +310,7 @@ The repo is both the plugin and its own marketplace, which is why `source` is
 python3 test_backends.py
 ```
 
-76 tests covering title recovery (custom over generated, last-wins, truncated
+84 tests covering title recovery (custom over generated, last-wins, truncated
 JSON, tail-read boundary), message extraction from every event shape, focus
 suppression (including that a *different* session in the same app is never
 suppressed, and that permission prompts never are), the exact argv / toast XML
