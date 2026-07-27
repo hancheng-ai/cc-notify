@@ -50,7 +50,7 @@ are never suppressed, since a wrong guess there would leave a session hanging.
 | One live banner per session | ✅ | ✅ | ✅ |
 | Click to jump to the session | ✅ | ➖ | ⚠️ |
 | Quiet when you're watching | ✅ | ➖ | ➖ |
-| Icon of the triggering app | ✅ | ➖ | ➖ |
+| Own icon + Notification Center group | ✅ | ➖ | ➖ |
 | Backend | `terminal-notifier`, falling back to `osascript` | `notify-send` | PowerShell toast |
 | Verified on real hardware | ✅ | ⚠️ | ⚠️ |
 
@@ -130,8 +130,8 @@ Restart Claude Code, then check it end to end:
 python3 ~/.claude/hooks/notify.py --self-test
 ```
 
-That prints what it resolved — platform, session, title, deep link, icon,
-backend — and sends a real notification for your most recent session.
+That prints what it resolved — platform, session, title, deep link, backend and
+notifier identity — and sends a real notification for your most recent session.
 
 ### Turn it down
 
@@ -142,6 +142,7 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_NO_TURN_END=1` | Stop notifying when turns finish or fail; keep permission and idle prompts |
 | `CC_NOTIFY_NO_SUPPRESS=1` | Always notify, even for the session you're looking at |
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
+| `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier` instead of building our own identity |
 
 Per-session grouping means a chatty session replaces its own banner rather than
 stacking, so turn-end notifications stay bounded at one per session.
@@ -180,11 +181,13 @@ reads your transcripts:
 - **No network access whatsoever.** There are no HTTP calls, no telemetry, no
   analytics, no crash reporting. The only URL-shaped string is the local
   `claude://` link handed to your OS.
-- **What it writes:** cached app-icon PNGs under
-  `~/.claude/.cache/cc-notify-icons/` (macOS only). The installer
-  additionally writes `~/.claude/settings.json`, backing it up first.
-- **What it runs:** `ps`, `sips`, `lsappinfo`, `terminal-notifier`, `osascript`
-  (macOS); `notify-send` (Linux); `powershell` (Windows). Nothing else.
+- **What it writes:** a re-badged copy of `terminal-notifier` (~1.2 MB) under
+  `~/.claude/.cache/cc-notify/` or `${CLAUDE_PLUGIN_DATA}`, built once so
+  notifications carry their own identity. The installer additionally writes
+  `~/.claude/settings.json`, backing it up first.
+- **What it runs:** `ps`, `lsappinfo`, `codesign`, `terminal-notifier`,
+  `osascript` (macOS); `notify-send` (Linux); `powershell` (Windows). Nothing
+  else. Every one of them has its output discarded to `/dev/null` and a timeout.
 - **Your session names and Claude's last line appear on screen.** If either is
   sensitive it will be visible in notifications — worth knowing before you
   screen-share.
@@ -210,14 +213,27 @@ idempotent — firing it repeatedly creates no duplicate sessions. The session i
 is checked against a UUID pattern first, because the app silently discards
 anything that doesn't match.
 
-**On macOS the icon uses `-appIcon`, never `-sender`.** Both can show another
-app's icon, but `-sender` reassigns ownership of the notification and hands the
-click to that app — which would destroy the deep-link navigation. `-appIcon`
-changes only the picture. The triggering app is found by walking the process
-ancestry until a `.app` bundle with an icon appears; its `.icns` is converted
-once with `sips` and cached. Toolchain paths are skipped, because
-`/usr/bin/python3` actually lives inside `Xcode.app` and would otherwise brand
-every notification with the Xcode icon.
+**On macOS it posts under its own identity.** macOS takes a banner's icon — and
+its Notification Center grouping — from the *sending* application, so every tool
+that shells out to the one shared `terminal-notifier` looks identical and lands
+in a single pile. You can't tell which of them is asking for you, which is the
+whole problem this plugin exists to solve.
+
+Neither flag `terminal-notifier` offers fixes that. `-appIcon` is accepted and
+then **silently ignored** by current macOS — visually indistinguishable from
+sending nothing. `-sender` would set the identity properly but **hangs for over
+12 seconds** (measured), and would additionally hand the click to that app,
+destroying the deep link.
+
+So on first use it builds a private, re-badged copy of the notifier in
+`~/.claude/.cache/cc-notify/` (or `${CLAUDE_PLUGIN_DATA}`): same binary, its own
+bundle id, and the icon of whichever app launched the session — found by walking
+the process ancestry, skipping toolchain paths, since `/usr/bin/python3` lives
+inside `Xcode.app` and would otherwise brand every notification with the Xcode
+icon. The bundle is re-signed ad-hoc afterwards, because macOS otherwise records
+the wrong identity. That build costs ~2s once; later notifications reuse it and
+run in ~0.3s. If anything about it fails, it silently falls back to the shared
+notifier — a wrong icon beats no notification. `CC_NOTIFY_NO_REBADGE=1` opts out.
 
 Some smaller decisions worth knowing:
 
@@ -263,7 +279,7 @@ The repo is both the plugin and its own marketplace, which is why `source` is
 python3 test_backends.py
 ```
 
-66 tests covering title recovery (custom over generated, last-wins, truncated
+76 tests covering title recovery (custom over generated, last-wins, truncated
 JSON, tail-read boundary), message extraction from every event shape, focus
 suppression (including that a *different* session in the same app is never
 suppressed, and that permission prompts never are), the exact argv / toast XML
@@ -271,6 +287,10 @@ each backend emits — including injection attempts through session names — an
 the packaging itself: manifest/marketplace version agreement, exec-form hook
 shape, turn-end event registration, and that no component directory has drifted
 into `.claude-plugin/`.
+
+One of them is a regression test with teeth: it asserts a notifier that leaves a
+helper holding the output pipe cannot block us past the timeout. Reintroduce the
+bug it guards and that test fails in 10s instead of passing in 0.3s.
 
 The suite posts no real notifications and never blocks: it asserts the hook
 exits 0 on malformed input, on `stop_hook_active`, and on garbage stdin.

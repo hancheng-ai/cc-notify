@@ -153,17 +153,27 @@ class Build(unittest.TestCase):
 
 class MacBackend(unittest.TestCase):
     def test_full_invocation(self):
-        a = N.macos_argv("/tn", "Title", "repo · plan", "msg", LINK, UUID, "file:///i.png")
+        a = N.macos_argv("/tn", "Title", "repo · plan", "msg", LINK, UUID)
         self.assertEqual(a[0], "/tn")
         for flag, val in (("-title", "Title"), ("-subtitle", "repo · plan"),
-                          ("-message", "msg"), ("-open", LINK),
-                          ("-group", UUID), ("-appIcon", "file:///i.png")):
+                          ("-message", "msg"), ("-open", LINK), ("-group", UUID)):
             self.assertIn(flag, a)
             self.assertEqual(a[a.index(flag) + 1], val)
 
+    def test_appicon_is_not_used(self):
+        """Current macOS accepts -appIcon and then ignores it, so sending it
+        only cost an icon conversion per notification. Identity comes from the
+        re-badged sending bundle instead."""
+        self.assertNotIn("-appIcon", N.macos_argv("/tn", "T", "s", "m", LINK, UUID))
+
+    def test_sender_is_never_used(self):
+        """-sender would set the identity but hangs for >12s, measured, and
+        would also hand the click to that app, killing the deep link."""
+        self.assertNotIn("-sender", N.macos_argv("/tn", "T", "s", "m", LINK, UUID))
+
     def test_optional_flags_are_omitted(self):
-        a = N.macos_argv("/tn", "T", "", "m", None, None, None)
-        for flag in ("-subtitle", "-open", "-group", "-appIcon"):
+        a = N.macos_argv("/tn", "T", "", "m", None, None)
+        for flag in ("-subtitle", "-open", "-group"):
             self.assertNotIn(flag, a)
 
     def test_applescript_passes_text_as_arguments_not_source(self):
@@ -455,26 +465,82 @@ class PluginPackaging(unittest.TestCase):
         self.assertFalse(os.path.exists(stray))
 
 
-class PluginDataDir(unittest.TestCase):
-    def test_icon_cache_follows_claude_plugin_data(self):
-        """${CLAUDE_PLUGIN_ROOT} changes on every update, so cached artefacts
-        must live in the persistent data dir instead."""
-        import importlib
+class SubprocessSafety(unittest.TestCase):
+    def test_a_lingering_grandchild_cannot_defeat_the_timeout(self):
+        """A notifier that leaves a helper holding the inherited pipe must not
+        be able to block us. With capture_output the timeout kills only the
+        direct child while communicate() waits for every writer to close -
+        measured turning a 2.6s launch into a multi-minute hang."""
+        import time
+        spawner = ("import subprocess,sys;"
+                   "subprocess.Popen([sys.executable,'-c','import time;time.sleep(25)']);"
+                   "sys.exit(0)")
+        t0 = time.time()
+        N._run([sys.executable, "-c", spawner])
+        # Threshold sits below _run's own 10s timeout on purpose: with
+        # capture_output the buggy path burns the full timeout before returning,
+        # so a looser bound would let the regression through.
+        self.assertLess(time.time() - t0, 5,
+                        "_run blocked on a grandchild holding the output pipe")
+
+    def test_run_never_raises(self):
+        self.assertFalse(N._run(["/definitely/not/a/binary"]))
+
+
+class RebadgedNotifier(unittest.TestCase):
+    def test_rebadge_home_follows_claude_plugin_data(self):
+        """${CLAUDE_PLUGIN_ROOT} changes on every update, so the generated
+        notifier bundle must live in the persistent data dir instead."""
         old = os.environ.get("CLAUDE_PLUGIN_DATA")
         try:
             os.environ["CLAUDE_PLUGIN_DATA"] = "/tmp/ccn-data-test"
-            m = importlib.reload(N)
-            self.assertEqual(m.ICONS, "/tmp/ccn-data-test/icons")
-            del os.environ["CLAUDE_PLUGIN_DATA"]
-            m = importlib.reload(N)
-            self.assertIn(".claude", m.ICONS)
-            self.assertNotIn("ccn-data-test", m.ICONS)
+            self.assertEqual(N._rebadge_home(), "/tmp/ccn-data-test/notifier")
+            os.environ.pop("CLAUDE_PLUGIN_DATA")
+            self.assertIn(".claude", N._rebadge_home())
+            self.assertNotIn("ccn-data-test", N._rebadge_home())
         finally:
             if old is not None:
                 os.environ["CLAUDE_PLUGIN_DATA"] = old
             else:
                 os.environ.pop("CLAUDE_PLUGIN_DATA", None)
-            importlib.reload(N)
+
+    def test_rebadge_can_be_disabled(self):
+        os.environ["CC_NOTIFY_NO_REBADGE"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_REBADGE", None)
+        self.assertIsNone(N.rebadged_notifier("/usr/local/bin/terminal-notifier"))
+
+    def test_rebadge_falls_back_when_source_bundle_is_missing(self):
+        """A wrong icon is far better than no notification, so any failure here
+        must return None and let the caller use the shared notifier."""
+        with tempfile.TemporaryDirectory() as tmp:  # isolate from a cached build
+            old = os.environ.get("CLAUDE_PLUGIN_DATA")
+            os.environ["CLAUDE_PLUGIN_DATA"] = tmp
+            try:
+                self.assertIsNone(N.rebadged_notifier("/nonexistent/terminal-notifier"))
+            finally:
+                if old is not None:
+                    os.environ["CLAUDE_PLUGIN_DATA"] = old
+                else:
+                    os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+
+    def test_an_existing_build_is_reused_rather_than_rebuilt(self):
+        """The build costs ~2s; every notification after the first must skip it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old = os.environ.get("CLAUDE_PLUGIN_DATA")
+            os.environ["CLAUDE_PLUGIN_DATA"] = tmp
+            try:
+                binary = os.path.join(tmp, "notifier", "cc-notify.app",
+                                      "Contents", "MacOS", "terminal-notifier")
+                os.makedirs(os.path.dirname(binary))
+                open(binary, "w").close()
+                os.chmod(binary, 0o755)
+                # Source path is bogus: reaching it at all would mean a rebuild.
+                self.assertEqual(N.rebadged_notifier("/nonexistent/tn"), binary)
+            finally:
+                if old is not None:
+                    os.environ["CLAUDE_PLUGIN_DATA"] = old
+                else:
+                    os.environ.pop("CLAUDE_PLUGIN_DATA", None)
 
 
 if __name__ == "__main__":

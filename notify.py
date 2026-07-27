@@ -25,10 +25,12 @@ Three things make this work, none of them obvious:
    session; later uses just navigate. Verified idempotent - repeat clicks do not
    create duplicate sessions.
 
-3. On macOS the icon uses terminal-notifier's `-appIcon`, never `-sender`.
-   `-sender` reassigns the notification to another app and hands it the click,
-   which would destroy the deep-link navigation. `-appIcon` changes only the
-   picture.
+3. macOS draws the banner's icon, and its Notification Center grouping, from
+   the SENDING app - so every tool sharing one terminal-notifier looks alike and
+   piles into one group. Neither of its flags fixes that: `-appIcon` is accepted
+   then silently ignored, and `-sender` hangs for over 12 seconds and would hand
+   the click to that app. So we build a private re-badged copy of the notifier
+   carrying our own bundle id and icon.
 
 Design rules: standard library only, known install locations checked before a
 PATH lookup, every failure silent, and never block the session. Notification
@@ -42,7 +44,7 @@ network-shaped string in this file is a `claude://` URL handed to the OS.
 
 MIT licensed. https://github.com/hancheng-ai/cc-notify
 """
-import sys, json, os, re, shutil, subprocess, urllib.parse
+import sys, json, os, re, plistlib, shutil, subprocess
 from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_attr
 
 IS_MAC = sys.platform == "darwin"
@@ -64,14 +66,7 @@ TN_PATHS = ("/usr/local/bin/terminal-notifier",     # Homebrew on Intel
             "/opt/homebrew/bin/terminal-notifier")  # Homebrew on Apple Silicon
 NOTIFY_SEND_PATHS = ("/usr/bin/notify-send", "/usr/local/bin/notify-send")
 POWERSHELL_PATHS = (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",)
-MAC_PS, MAC_SIPS = "/bin/ps", "/usr/bin/sips"
-
-# ${CLAUDE_PLUGIN_ROOT} changes on every plugin update, so cached artefacts must
-# not live there. When running as a plugin Claude Code provides a persistent data
-# directory; standalone installs fall back to the usual cache location.
-ICONS = (os.path.join(os.environ["CLAUDE_PLUGIN_DATA"], "icons")
-         if os.environ.get("CLAUDE_PLUGIN_DATA")
-         else os.path.expanduser("~/.claude/.cache/cc-notify-icons"))
+MAC_PS = "/bin/ps"
 
 
 def _first_executable(paths, *names):
@@ -131,50 +126,36 @@ def session_title(path):
 # macOS: trigger icon via process ancestry
 # --------------------------------------------------------------------------
 
-def _icon_for(exe):
-    """Map an executable path to its .app icon as a cached PNG file:// URL."""
+def _icon_bearing_bundle(exe):
+    """The .app an executable belongs to, if that bundle has its own icon."""
     i = exe.find(".app/")
     if i < 0:
         return None
     # Skip toolchain paths. /usr/bin/python3 actually lives inside
     # Xcode.app/Contents/Developer, so without this every notification would
-    # proudly display the Xcode icon.
+    # proudly wear the Xcode icon.
     if "/Contents/Developer/" in exe:
         return None
     bundle = exe[:i + 4]
     try:
-        import plistlib
         with open(os.path.join(bundle, "Contents", "Info.plist"), "rb") as f:
-            icon = (plistlib.load(f) or {}).get("CFBundleIconFile")
+            info = plistlib.load(f) or {}
     except Exception:
         return None
+    icon = info.get("CFBundleIconFile")
     if not icon:
-        return None  # icon-less wrapper bundle; keep walking up to the real host
+        return None  # icon-less wrapper; keep walking up to the real host
     if not icon.endswith(".icns"):
         icon += ".icns"
     src = os.path.join(bundle, "Contents", "Resources", icon)
-    if not os.path.isfile(src):
-        return None
-
-    dst = os.path.join(ICONS, (os.path.basename(bundle)[:-4] or "app") + ".png")
-    if not os.path.isfile(dst):  # convert once, then reuse
-        try:
-            os.makedirs(ICONS, exist_ok=True)
-            subprocess.run([MAC_SIPS, "-s", "format", "png", "-Z", "128", src, "--out", dst],
-                           capture_output=True, timeout=10)
-        except Exception:
-            return None
-        if not os.path.isfile(dst):
-            return None
-    return "file://" + urllib.parse.quote(dst)
+    return src if os.path.isfile(src) else None
 
 
-def trigger_icon():
-    """Icon of whichever app triggered this hook, found by walking ancestors.
+def trigger_app_icns():
+    """.icns of whichever app triggered this hook, found by walking ancestors.
 
-    Started from the Claude desktop app you get the Claude icon; started from a
-    terminal you get Terminal's or iTerm's. macOS only - there is no comparable
-    per-app icon lookup on Linux, and Windows toasts use their own image model.
+    Started from the Claude desktop app you get Claude's icon; started from a
+    terminal you get Terminal's or iTerm's. macOS only.
     """
     if not IS_MAC:
         return None
@@ -190,9 +171,9 @@ def trigger_icon():
         if len(parts) < 2:
             return None
         ppid, exe = parts[0], parts[1].strip()
-        url = _icon_for(exe)
-        if url:
-            return url
+        icns = _icon_bearing_bundle(exe)
+        if icns:
+            return icns
         if ppid in ("0", "1", str(pid)):
             return None
         try:
@@ -200,6 +181,93 @@ def trigger_icon():
         except ValueError:
             return None
     return None
+
+
+# --------------------------------------------------------------------------
+# Notifier identity - claim our own slot in Notification Center
+# --------------------------------------------------------------------------
+#
+# macOS draws a notification's left-hand icon, and its Notification Center
+# grouping, from the SENDING application. Every tool that shells out to the one
+# shared terminal-notifier therefore looks identical and lands in one pile, so
+# you cannot tell which of them is asking for you.
+#
+# Neither flag terminal-notifier offers solves it. `-appIcon` is accepted and
+# then silently ignored by current macOS (verified: indistinguishable from no
+# flag at all). `-sender` would set the identity properly, but it HANGS - over
+# 12 seconds with no return, measured - and would additionally hand the click to
+# that app, destroying the deep-link navigation.
+#
+# What works is giving ourselves a private, re-badged copy of the notifier: same
+# binary, our own bundle id, our own icon. Built once, then reused.
+
+REBADGE_ID = "ai.hancheng.cc-notify"
+CODESIGN = "/usr/bin/codesign"
+
+
+def _rebadge_home():
+    base = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/.cache/cc-notify")
+    return os.path.join(base, "notifier")
+
+
+def _source_notifier_app(tn_binary):
+    """Locate terminal-notifier's own .app bundle from its CLI symlink."""
+    real = os.path.realpath(tn_binary)
+    for candidate in (os.path.join(os.path.dirname(os.path.dirname(real)), "terminal-notifier.app"),
+                      os.path.join(os.path.dirname(real), "terminal-notifier.app")):
+        if os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def rebadged_notifier(tn_binary):
+    """Path to our own notifier binary, building it once if needed.
+
+    Returns None on any problem, so the caller simply falls back to the shared
+    terminal-notifier - a wrong icon is much better than no notification.
+    """
+    if not IS_MAC or os.environ.get("CC_NOTIFY_NO_REBADGE"):
+        return None
+    app = os.path.join(_rebadge_home(), "cc-notify.app")
+    binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
+    if os.access(binary, os.X_OK):
+        return binary
+
+    src = _source_notifier_app(tn_binary)
+    if not src:
+        return None
+    try:
+        os.makedirs(_rebadge_home(), exist_ok=True)
+        if os.path.isdir(app):
+            shutil.rmtree(app)
+        shutil.copytree(src, app, symlinks=True)
+
+        plist = os.path.join(app, "Contents", "Info.plist")
+        with open(plist, "rb") as f:
+            info = plistlib.load(f)
+        info["CFBundleIdentifier"] = REBADGE_ID
+        info["CFBundleName"] = "cc-notify"
+        icon_name = info.get("CFBundleIconFile") or "Terminal"
+        if not icon_name.endswith(".icns"):
+            icon_name += ".icns"
+        with open(plist, "wb") as f:
+            plistlib.dump(info, f)
+
+        # Wear the icon of whatever launched the session, so the banner looks
+        # like what it is about. Sourced from the local machine at runtime and
+        # never redistributed.
+        icns = trigger_app_icns()
+        if icns:
+            shutil.copyfile(icns, os.path.join(app, "Contents", "Resources", icon_name))
+
+        # Re-sign after editing the bundle, or macOS records the wrong identity
+        # and may refuse to deliver at all.
+        subprocess.run([CODESIGN, "--force", "--deep", "--sign", "-", app],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       start_new_session=True, timeout=30)
+    except Exception:
+        return None
+    return binary if os.access(binary, os.X_OK) else None
 
 
 # --------------------------------------------------------------------------
@@ -284,8 +352,14 @@ def user_is_watching(session_id):
 # desktop session. The runners below are thin wrappers around these.
 # --------------------------------------------------------------------------
 
-def macos_argv(tn, title, sub, msg, url, group, icon):
-    """terminal-notifier invocation. Click-to-jump and grouping both supported."""
+def macos_argv(tn, title, sub, msg, url, group):
+    """terminal-notifier invocation. Click-to-jump and grouping both supported.
+
+    Note the absence of `-appIcon`: current macOS accepts and then ignores it,
+    so it bought nothing while costing an icon conversion on every notification.
+    The banner's icon comes from the sending bundle instead - see the notifier
+    identity section above.
+    """
     argv = [tn, "-title", title, "-message", msg]
     if sub:
         argv += ["-subtitle", sub]
@@ -293,8 +367,6 @@ def macos_argv(tn, title, sub, msg, url, group, icon):
         argv += ["-open", url]
     if group:
         argv += ["-group", group]  # replaces this session's previous banner
-    if icon:
-        argv += ["-appIcon", icon]
     return argv
 
 
@@ -373,8 +445,23 @@ def applescript_argv(title, sub, msg):
 # --------------------------------------------------------------------------
 
 def _run(argv, **kw):
+    """Run a notifier, discarding its output.
+
+    stdout and stderr go to /dev/null rather than into pipes. That is not a
+    stylistic choice: a notifier that spawns a helper which inherits the pipe
+    keeps subprocess.run blocked long past its timeout, because the timeout
+    kills only the direct child while communicate() waits for every writer to
+    close. Measured: this turned a 2.6s first launch into a multi-minute hang.
+    start_new_session puts the child in its own process group so the timeout can
+    take the whole group down instead of orphaning it.
+
+    Discarding is right on its own merits too - stdout beginning with "{" is
+    parsed by Claude Code as a control decision, so nothing may leak upward.
+    """
     try:
-        return subprocess.run(argv, timeout=10, capture_output=True, **kw).returncode == 0
+        return subprocess.run(argv, timeout=10, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, start_new_session=True,
+                              **kw).returncode == 0
     except Exception:
         return False
 
@@ -387,8 +474,11 @@ def notify(title, sub, msg, url, group):
         return
     if IS_MAC:
         tn = _first_executable(TN_PATHS, "terminal-notifier")
-        if tn and _run(macos_argv(tn, title, sub, msg, url, group, trigger_icon())):
-            return
+        if tn:
+            # Prefer our own re-badged copy so the banner carries our identity
+            # rather than being pooled with every other terminal-notifier user.
+            if _run(macos_argv(rebadged_notifier(tn) or tn, title, sub, msg, url, group)):
+                return
         _run(applescript_argv(title, sub, msg))
         return
 
@@ -565,12 +655,18 @@ def self_test():
          "permission_mode": "default",
          "message": "Self-test - click me to jump to this session."})
 
+    identity = "shared terminal-notifier"
     if IS_MAC:
-        backend = _first_executable(TN_PATHS, "terminal-notifier") or "osascript (no click-to-jump)"
+        tn = _first_executable(TN_PATHS, "terminal-notifier")
+        backend = tn or "osascript (no click-to-jump)"
+        if tn and rebadged_notifier(tn):
+            identity = f"{REBADGE_ID} (own icon and Notification Center group)"
     elif IS_LINUX:
         backend = _first_executable(NOTIFY_SEND_PATHS, "notify-send") or "MISSING - install libnotify"
+        identity = "notify-send"
     elif IS_WIN:
         backend = _first_executable(POWERSHELL_PATHS, "powershell", "pwsh") or "MISSING - powershell"
+        identity = "PowerShell toast"
     else:
         backend = f"unsupported platform: {sys.platform}"
 
@@ -579,8 +675,8 @@ def self_test():
     print(f"title     : {title}")
     print(f"subtitle  : {sub or '(none)'}")
     print(f"deep link : {url or '(not supported on this platform)'}")
-    print(f"icon      : {trigger_icon() or '(macOS only)'}")
     print(f"backend   : {backend}")
+    print(f"identity  : {identity}")
     notify(title, sub, msg, url, group)
     print("\nSent. Check your notifications" + (", then click it." if url else "."))
     return 0
