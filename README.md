@@ -150,7 +150,8 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_NO_SUPPRESS=1` | Always notify, even for the session you're looking at |
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
 | `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier`. **Try this first if you see no notifications at all** — a bundle id macOS has not authorized is dropped silently |
-| `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump, so clicking can never add a session entry |
+| `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump entirely |
+| `CC_NOTIFY_ALWAYS_DEEPLINK=1` | Always attach a click target, accepting that some clicks add a session row |
 
 Per-session grouping means a chatty session replaces its own banner rather than
 stacking, so turn-end notifications stay bounded at one per session.
@@ -235,9 +236,20 @@ doesn't match.
 > and archive the other one. Every future click resolves there, leaving one
 > correctly-named row.
 >
-> `python3 notify.py --doctor` finds these pairs for you and prints which entry
-> to keep. `CC_NOTIFY_NO_DEEPLINK=1` drops click-to-jump entirely if you would
-> rather have a pristine session list.
+> **So the click target is withheld when it would litter.** If clicking a given
+> session's notification would create that second row, the banner ships without
+> a link — it still tells you which session wants you, which is the main job.
+> Litter is worse than a missing click, especially since you cannot un-litter:
+> archiving the extra row is undone by the next click.
+>
+> This is **self-healing**. Converge a session once — name its `local_<uuid>`
+> entry, archive the other, as `--doctor` explains — and click-to-jump returns
+> for it automatically, because clicking then merely navigates. Sessions the app
+> already lists as `local_<uuid>` have working clicks from the start.
+>
+> `python3 notify.py --doctor` lists what is still un-converged.
+> `CC_NOTIFY_ALWAYS_DEEPLINK=1` restores clicking everywhere if you would rather
+> have the jump and tolerate the rows.
 >
 > This was originally documented here as "verified idempotent". That was wrong,
 > and wrong in an instructive way: the test only ever fired at a session whose

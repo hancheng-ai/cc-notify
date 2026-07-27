@@ -529,6 +529,48 @@ class DuplicateSessionEntries(unittest.TestCase):
         self.assertTrue(N.would_duplicate(UUID))
 
 
+class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
+    """The click target is dropped for any session where clicking would mint a
+    second, untitled row. Litter is worse than a missing click - the banner
+    still says which session wants you."""
+
+    def setUp(self):
+        self._real = N.would_duplicate
+        self.addCleanup(setattr, N, "would_duplicate", self._real)
+        self._plat = (N.IS_MAC, N.IS_WIN, N.IS_LINUX)
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        self.addCleanup(lambda: setattr_all(N, self._plat))
+        for v in ("CC_NOTIFY_NO_DEEPLINK", "CC_NOTIFY_ALWAYS_DEEPLINK"):
+            os.environ.pop(v, None)
+
+    def test_no_link_when_clicking_would_add_a_row(self):
+        N.would_duplicate = lambda sid: True
+        self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
+
+    def test_link_present_once_the_session_is_converged(self):
+        """Self-healing: converge a session and its click-to-jump returns."""
+        N.would_duplicate = lambda sid: False
+        self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
+
+    def test_always_deeplink_overrides_the_guard(self):
+        N.would_duplicate = lambda sid: True
+        os.environ["CC_NOTIFY_ALWAYS_DEEPLINK"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_ALWAYS_DEEPLINK", None)
+        self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
+
+    def test_no_deeplink_still_wins_over_always(self):
+        N.would_duplicate = lambda sid: False
+        os.environ["CC_NOTIFY_NO_DEEPLINK"] = "1"
+        os.environ["CC_NOTIFY_ALWAYS_DEEPLINK"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_DEEPLINK", None)
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_ALWAYS_DEEPLINK", None)
+        self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
+
+
+def setattr_all(mod, plat):
+    mod.IS_MAC, mod.IS_WIN, mod.IS_LINUX = plat
+
+
 class DeepLinkOptOut(unittest.TestCase):
     def test_no_deeplink_env_removes_the_click_target(self):
         os.environ["CC_NOTIFY_NO_DEEPLINK"] = "1"

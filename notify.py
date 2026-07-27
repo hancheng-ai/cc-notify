@@ -706,9 +706,19 @@ def build(d):
     sid = str(d.get("session_id") or "")
     url = (f"claude://resume?session={sid}"
            if UUID_RE.match(sid) and deep_link_supported() else None)
-    # Opt out of click-to-jump entirely, for anyone who would rather keep their
-    # session list pristine than be able to click through to a session.
-    if os.environ.get("CC_NOTIFY_NO_DEEPLINK"):
+
+    if url and os.environ.get("CC_NOTIFY_NO_DEEPLINK"):
+        url = None  # click-to-jump off entirely
+    elif url and would_duplicate(sid) and not os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK"):
+        # Clicking this one would mint a second, untitled row for a conversation
+        # the app already lists. Litter is worse than a missing click: the banner
+        # still tells you which session wants you, which is the main job.
+        #
+        # Self-healing on purpose. Converge that session once - name the
+        # local_<uuid> entry, archive the other, as `--doctor` explains - and the
+        # link comes back for it automatically, because clicking then merely
+        # navigates. CC_NOTIFY_ALWAYS_DEEPLINK=1 restores the old behaviour for
+        # anyone who would rather have the click and tolerate the extra rows.
         url = None
     return title, sub, msg, url, (sid or None)
 
@@ -804,6 +814,8 @@ def doctor():
     print("Clicking a notification imports a session as local_<uuid>. When the app already")
     print("tracked that conversation under another id, you get a second row for it.")
     print("Archiving the extra row does NOT stick - the next click un-archives it.\n")
+    print("Notifications for an un-converged session therefore carry NO click target,")
+    print("so no new rows appear. Converge one and its click-to-jump returns.\n")
     for cli, canonical, others in pairs:
         print(f"conversation {cli}")
         print(f"  canonical (click always lands here) : {canonical or '(not created yet)'}")
