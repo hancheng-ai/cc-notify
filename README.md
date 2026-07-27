@@ -130,15 +130,15 @@ Restart Claude Code, then check it end to end:
 python3 ~/.claude/hooks/notify.py --self-test
 ```
 
-And to check whether any conversation is listed twice (see the deep-link caveat
-below), plus which entry to keep:
+That prints what it resolved — platform, session, title, deep link, backend and
+notifier identity — and sends a real notification for your most recent session.
+
+To check whether any conversation is listed twice (see the deep-link caveat
+below), and which entry to keep:
 
 ```bash
 python3 ~/.claude/hooks/notify.py --doctor
 ```
-
-That prints what it resolved — platform, session, title, deep link, backend and
-notifier identity — and sends a real notification for your most recent session.
 
 ### Turn it down
 
