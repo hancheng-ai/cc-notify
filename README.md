@@ -162,8 +162,8 @@ Available types include `permission_prompt`, `idle_prompt`, `auth_success`,
 
 ## Privacy
 
-Everything is local, and it is worth being explicit about that because the hook
-reads your transcripts:
+Full policy: [PRIVACY.md](PRIVACY.md). In short — everything is local, and it is
+worth being explicit about that because the hook reads your transcripts:
 
 - **It reads transcript files** (`~/.claude/projects/**.jsonl`) to recover the
   session name. Only the last 512 KB of a file is read, and only `custom-title` /
