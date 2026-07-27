@@ -27,10 +27,12 @@ DRY = "--dry-run" in sys.argv
 def interpreter():
     """Pick the interpreter the hook will be launched with.
 
-    On macOS and Linux prefer the absolute system python: a GUI app spawns hooks
-    with a nearly empty PATH, and a virtualenv path would break the moment that
-    environment is rebuilt or switched. On Windows there is no such fixed
-    location, so the current interpreter is the best available answer.
+    On macOS and Linux prefer the absolute system python. Hooks inherit Claude
+    Code's own environment, so a PATH lookup would usually work - but recording
+    a fixed, always-present interpreter means the hook cannot be broken later by
+    a virtualenv being rebuilt, a pyenv shim changing, or a shell rc edit. On
+    Windows there is no such fixed location, so the current interpreter is the
+    best available answer.
     """
     if not IS_WIN and os.access("/usr/bin/python3", os.X_OK):
         return "/usr/bin/python3"
@@ -117,6 +119,24 @@ def check_dependencies():
         say(f"unsupported platform: {sys.platform}", False)
 
 
+def check_plugin_conflict(data):
+    """Warn if the plugin is also installed.
+
+    Plugin hooks merge with user hooks rather than overriding them, and command
+    hooks are deduplicated by command string - which will differ between the two
+    installs. So having both active means two notifications for every event.
+    """
+    enabled = data.get("enabledPlugins") or {}
+    hits = [k for k in enabled if k.split("@")[0] == "claude-code-notify" and enabled[k]]
+    if not hits:
+        return
+    say(f"the plugin is also installed: {', '.join(hits)}", False)
+    print("         Plugin hooks MERGE with settings.json hooks, so you would get")
+    print("         two notifications per event. Pick one:")
+    print("             claude plugin uninstall claude-code-notify   # keep this install")
+    print("             python3 install.py --uninstall              # keep the plugin")
+
+
 def install():
     if not (IS_MAC or IS_LINUX or IS_WIN):
         print(f"Unsupported platform: {sys.platform}")
@@ -126,6 +146,7 @@ def install():
         return 1
 
     check_dependencies()
+    check_plugin_conflict(load_settings())
 
     if DRY:
         say(f"would copy notify.py -> {TARGET}")

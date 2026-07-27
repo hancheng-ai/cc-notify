@@ -30,9 +30,11 @@ Three things make this work, none of them obvious:
    which would destroy the deep-link navigation. `-appIcon` changes only the
    picture.
 
-Design rules: standard library only, absolute interpreter paths (a GUI app
-spawns hooks with a nearly empty PATH), every failure silent, and never block
-the session. A notification hook that hangs is worse than no notification.
+Design rules: standard library only, known install locations checked before a
+PATH lookup, every failure silent, and never block the session. Notification
+hooks cannot block or modify anything, and a non-zero exit only produces stderr
+noise for the user - so this always exits 0, and a hook that hangs is worse than
+no notification.
 
 Privacy: everything is local. The transcript is read only to recover the session
 name, nothing is transmitted anywhere, and there is no telemetry. The only
@@ -54,15 +56,22 @@ TAIL = 512 * 1024  # transcripts get large; the newest title is near the end
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
                      r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
-# Absolute paths first: hooks launched by a GUI app get a nearly empty PATH, so
-# anything found only via PATH lookup will not be found at all. shutil.which is
-# a fallback for non-macOS setups where locations vary more.
+# Well-known absolute locations are tried before a PATH lookup. Hooks inherit
+# whatever environment Claude Code itself runs with - usually the full user PATH
+# - but that is not guaranteed to include Homebrew's directories, so checking
+# the known install paths first costs nothing and removes a failure mode.
 TN_PATHS = ("/usr/local/bin/terminal-notifier",     # Homebrew on Intel
             "/opt/homebrew/bin/terminal-notifier")  # Homebrew on Apple Silicon
 NOTIFY_SEND_PATHS = ("/usr/bin/notify-send", "/usr/local/bin/notify-send")
 POWERSHELL_PATHS = (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",)
 MAC_PS, MAC_SIPS = "/bin/ps", "/usr/bin/sips"
-ICONS = os.path.expanduser("~/.claude/.cache/claude-code-notify-icons")
+
+# ${CLAUDE_PLUGIN_ROOT} changes on every plugin update, so cached artefacts must
+# not live there. When running as a plugin Claude Code provides a persistent data
+# directory; standalone installs fall back to the usual cache location.
+ICONS = (os.path.join(os.environ["CLAUDE_PLUGIN_DATA"], "icons")
+         if os.environ.get("CLAUDE_PLUGIN_DATA")
+         else os.path.expanduser("~/.claude/.cache/claude-code-notify-icons"))
 
 
 def _first_executable(paths, *names):

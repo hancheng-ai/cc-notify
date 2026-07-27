@@ -63,15 +63,43 @@ No Python packages. Standard library only.
 
 ## Install
 
+### As a plugin (recommended)
+
+```bash
+claude plugin marketplace add hancheng-ai/claude-code-notify
+claude plugin install claude-code-notify@hancheng-ai
+```
+
+Or from inside Claude Code, `/plugin marketplace add hancheng-ai/claude-code-notify`
+then `/plugin install claude-code-notify@hancheng-ai`, followed by `/reload-plugins`.
+
+The plugin adds a single `Notification` hook and **no model context** —
+`claude plugin details claude-code-notify` reports it as
+`harness-only — no model context cost`, so it costs nothing per session.
+
+Updates come through `claude plugin update claude-code-notify`.
+
+### Or manually
+
+If you'd rather not use the plugin system:
+
 ```bash
 git clone https://github.com/hancheng-ai/claude-code-notify.git
 cd claude-code-notify
 python3 install.py
 ```
 
-The installer copies the hook to `~/.claude/hooks/notify.py` and registers it in
+This copies the hook to `~/.claude/hooks/notify.py` and registers it in
 `~/.claude/settings.json`. It **merges** into your existing configuration rather
 than overwriting it, and backs the file up first. Use `--dry-run` to preview.
+
+> **Don't do both.** Plugin hooks *merge* with your `settings.json` hooks rather
+> than replacing them, and command hooks are deduplicated by command string —
+> which differs between the two installs. Running both gives you **two
+> notifications for every event**. `install.py` detects this and tells you how to
+> resolve it; to keep the plugin, run `python3 install.py --uninstall`.
+
+### Verify
 
 Restart Claude Code, then check it end to end:
 
@@ -81,6 +109,19 @@ python3 ~/.claude/hooks/notify.py --self-test
 
 That prints what it resolved — platform, session, title, deep link, icon,
 backend — and sends a real notification for your most recent session.
+
+### Narrow which notifications you get
+
+By default the hook fires for every notification type. To limit it, add a
+`matcher` in `hooks/hooks.json` (plugin) or your `settings.json` entry —
+for example only permission prompts and idle prompts:
+
+```json
+{ "matcher": "permission_prompt|idle_prompt", "hooks": [ ... ] }
+```
+
+Available types include `permission_prompt`, `idle_prompt`, `auth_success`,
+`elicitation_dialog`, `agent_needs_input` and `agent_completed`.
 
 ## Privacy
 
@@ -135,10 +176,18 @@ every notification with the Xcode icon.
 
 Some smaller decisions worth knowing:
 
-- **Absolute paths first.** A GUI app spawns hooks with a nearly empty `PATH`,
-  so backends are addressed by absolute path before falling back to a `PATH`
-  lookup. A hook that resolves tools only through `PATH` works in your terminal
-  and then fails silently in the app.
+- **Known locations before a `PATH` lookup.** Hooks inherit whatever environment
+  Claude Code itself runs with — measured to be the full user `PATH`, including
+  Homebrew directories, when launched from the desktop app. That is not
+  guaranteed for every setup, so the well-known install paths are checked first;
+  it costs nothing and removes a failure mode.
+- **Nothing cached inside the plugin.** `${CLAUDE_PLUGIN_ROOT}` changes on every
+  plugin update, so icon caches go to `${CLAUDE_PLUGIN_DATA}` when running as a
+  plugin, and to `~/.claude/.cache/` otherwise.
+- **Exec form, not shell form.** The plugin hook passes the script path as an
+  `args` element rather than interpolating it into a shell string, which is what
+  the docs recommend for any hook referencing a path placeholder — no quoting to
+  get wrong, and install paths containing spaces just work.
 - **Failures are silent and bounded.** Every subprocess has a timeout, the
   ancestry walk has a hard depth limit, and any error degrades to a simpler
   notification. A hook that hangs is worse than one that says less.
@@ -149,16 +198,39 @@ Some smaller decisions worth knowing:
   title so a session named `--help` can't be read as a flag. All three are
   covered by tests.
 
+## Layout
+
+```
+.claude-plugin/plugin.json       plugin manifest
+.claude-plugin/marketplace.json  self-hosted marketplace (source: "./")
+hooks/hooks.json                 the Notification hook, exec form
+notify.py                        the hook itself
+install.py                       manual (non-plugin) installer
+test_backends.py                 test suite
+```
+
+The repo is both the plugin and its own marketplace, which is why `source` is
+`"./"` — no separate marketplace repo to keep in sync.
+
 ## Tests
 
 ```bash
 python3 test_backends.py
 ```
 
-34 tests covering title recovery (custom over generated, last-wins, truncated
+43 tests covering title recovery (custom over generated, last-wins, truncated
 JSON, tail-read boundary), payload handling, platform gating of the deep link,
-and the exact argv / toast XML each backend emits — including injection
-attempts through session names.
+the exact argv / toast XML each backend emits — including injection attempts
+through session names — and the packaging itself: manifest/marketplace version
+agreement, exec-form hook shape, and that no component directory has drifted
+into `.claude-plugin/`.
+
+Manifests are additionally checked with the real validator:
+
+```bash
+claude plugin validate .claude-plugin/plugin.json --strict
+claude plugin validate .claude-plugin/marketplace.json --strict
+```
 
 ## Limitations
 
@@ -177,12 +249,21 @@ attempts through session names.
 
 ## Uninstall
 
+If you installed the plugin:
+
+```bash
+claude plugin uninstall claude-code-notify
+```
+
+If you installed manually:
+
 ```bash
 python3 install.py --uninstall
 ```
 
-Removes the registration (leaving your other hooks untouched) and deletes the
-installed script. The notification backend is left installed.
+The manual uninstall removes only its own registration — your other hooks are
+left untouched — and deletes the installed script. The notification backend
+(`terminal-notifier` / `libnotify`) is left installed either way.
 
 ## License
 

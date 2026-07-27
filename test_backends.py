@@ -238,5 +238,80 @@ class WindowsBackend(unittest.TestCase):
         self.assertNotIn("x" * 65, s)
 
 
+class PluginPackaging(unittest.TestCase):
+    """Guards the plugin manifests. `claude plugin tag` refuses to cut a release
+    when plugin.json and the marketplace entry disagree, so drift between them is
+    worth catching here rather than at release time."""
+
+    ROOT = os.path.dirname(os.path.abspath(__file__))
+
+    def _json(self, *parts):
+        with open(os.path.join(self.ROOT, *parts), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_manifest_name_is_kebab_case(self):
+        name = self._json(".claude-plugin", "plugin.json")["name"]
+        self.assertRegex(name, r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+    def test_keywords_is_a_list(self):
+        """A bare string here is a hard plugin-load error, not a warning."""
+        self.assertIsInstance(self._json(".claude-plugin", "plugin.json")["keywords"], list)
+
+    def test_marketplace_entry_agrees_with_manifest(self):
+        p = self._json(".claude-plugin", "plugin.json")
+        entry, = self._json(".claude-plugin", "marketplace.json")["plugins"]
+        self.assertEqual(entry["name"], p["name"])
+        self.assertEqual(entry["version"], p["version"])
+
+    def test_plugin_lives_at_the_repo_root(self):
+        entry, = self._json(".claude-plugin", "marketplace.json")["plugins"]
+        self.assertEqual(entry["source"], "./")
+
+    def test_hooks_file_has_the_required_wrapper_key(self):
+        h = self._json("hooks", "hooks.json")
+        self.assertIn("hooks", h)
+        self.assertIn("Notification", h["hooks"])
+
+    def test_hook_uses_exec_form_with_the_plugin_root_placeholder(self):
+        """Exec form (args present) needs no shell quoting, so an install path
+        containing a space cannot break the command."""
+        handler, = self._json("hooks", "hooks.json")["hooks"]["Notification"][0]["hooks"]
+        self.assertEqual(handler["type"], "command")
+        self.assertIn("args", handler)
+        self.assertEqual(handler["args"], ["${CLAUDE_PLUGIN_ROOT}/notify.py"])
+        self.assertNotIn("${", handler["command"])  # placeholder belongs in args
+
+    def test_hook_script_is_actually_shipped(self):
+        self.assertTrue(os.path.isfile(os.path.join(self.ROOT, "notify.py")))
+
+    def test_components_are_not_inside_the_manifest_dir(self):
+        """Docs call this out as the most common plugin mistake: only
+        plugin.json belongs in .claude-plugin/."""
+        stray = os.path.join(self.ROOT, ".claude-plugin", "hooks")
+        self.assertFalse(os.path.exists(stray))
+
+
+class PluginDataDir(unittest.TestCase):
+    def test_icon_cache_follows_claude_plugin_data(self):
+        """${CLAUDE_PLUGIN_ROOT} changes on every update, so cached artefacts
+        must live in the persistent data dir instead."""
+        import importlib
+        old = os.environ.get("CLAUDE_PLUGIN_DATA")
+        try:
+            os.environ["CLAUDE_PLUGIN_DATA"] = "/tmp/ccn-data-test"
+            m = importlib.reload(N)
+            self.assertEqual(m.ICONS, "/tmp/ccn-data-test/icons")
+            del os.environ["CLAUDE_PLUGIN_DATA"]
+            m = importlib.reload(N)
+            self.assertIn(".claude", m.ICONS)
+            self.assertNotIn("ccn-data-test", m.ICONS)
+        finally:
+            if old is not None:
+                os.environ["CLAUDE_PLUGIN_DATA"] = old
+            else:
+                os.environ.pop("CLAUDE_PLUGIN_DATA", None)
+            importlib.reload(N)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
