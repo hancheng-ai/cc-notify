@@ -591,6 +591,8 @@ class RebadgedNotifier(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             old = os.environ.get("CLAUDE_PLUGIN_DATA")
             os.environ["CLAUDE_PLUGIN_DATA"] = tmp
+            os.environ["CC_NOTIFY_REBADGE"] = "1"  # feature is opt-in
+            self.addCleanup(os.environ.pop, "CC_NOTIFY_REBADGE", None)
             try:
                 binary = os.path.join(tmp, "notifier", "cc-notify.app",
                                       "Contents", "MacOS", "terminal-notifier")
