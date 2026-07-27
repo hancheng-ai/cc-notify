@@ -207,11 +207,24 @@ read, because transcripts routinely reach tens of megabytes — a 6.4 MB
 transcript resolves in about 0.1 s.
 
 **Clicking uses an internal deep link.** `claude://resume?session=<uuid>` is
-handled by the Claude desktop app: the first use adopts the CLI session as a
-desktop session, and later uses simply navigate to it. This was verified to be
-idempotent — firing it repeatedly creates no duplicate sessions. The session id
-is checked against a UUID pattern first, because the app silently discards
-anything that doesn't match.
+handled by the Claude desktop app: it imports the CLI session as a desktop
+session named `local_<uuid>` and navigates there. The session id is checked
+against a UUID pattern first, because the app silently discards anything that
+doesn't match.
+
+> **Known caveat — it can duplicate a session entry.** If the CLI session
+> already has a desktop session under a *different* id, importing creates a
+> **second** entry in your session list pointing at the same conversation.
+> Clicks after that are idempotent, because `local_<uuid>` is deterministic — but
+> that first click leaves a duplicate behind. Conversation history is not
+> affected; the extra entry is a second view, and archiving it is safe once you
+> have confirmed which of the pair is the original (compare `createdAt` in
+> `~/Library/Application Support/Claude/claude-code-sessions/`; the duplicate is
+> the one named `local_<cliSessionId>`).
+>
+> This was originally documented here as "verified idempotent". That was wrong:
+> the test only ever fired at a session whose desktop record the test itself had
+> created, and never at one that already had a record by another route.
 
 **On macOS it posts under its own identity.** macOS takes a banner's icon — and
 its Notification Center grouping — from the *sending* application, so every tool
@@ -325,7 +338,8 @@ welcome.
 ## Limitations
 
 - **`claude://resume` is internal and undocumented.** It works today and was
-  verified idempotent, but Anthropic may change it. If clicking stops working,
+  observed to duplicate a session entry on first click (see above), and Anthropic
+  may change it at any time. If clicking stops working,
   that's the first thing to check — notifications themselves will keep working.
 - **terminal-notifier is at 2.0.0** and lightly maintained. On macOS,
   notifications appear under its identity and need notification permission

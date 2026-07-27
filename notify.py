@@ -21,9 +21,15 @@ Three things make this work, none of them obvious:
    routinely reach tens of megabytes.
 
 2. Clicking is wired to `claude://resume?session=<uuid>`, an internal deep link
-   in the Claude desktop app. The first use adopts the CLI session as a desktop
-   session; later uses just navigate. Verified idempotent - repeat clicks do not
-   create duplicate sessions.
+   in the Claude desktop app, which imports the CLI session as a desktop session
+   named `local_<uuid>` and navigates to it.
+
+   CAVEAT, measured the hard way: if that CLI session ALREADY has a desktop
+   session under a different id, the import creates a SECOND desktop entry
+   pointing at the same conversation - a visible duplicate in the session list.
+   Repeat clicks after that are idempotent (the `local_<uuid>` name is
+   deterministic, so no third entry appears), but the first click on an
+   already-imported session does duplicate it.
 
 3. macOS draws the banner's icon, and its Notification Center grouping, from
    the SENDING app - so every tool sharing one terminal-notifier looks alike and
