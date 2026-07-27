@@ -8,7 +8,7 @@ hostile session titles.
 
     python3 test_backends.py
 """
-import json, os, sys, tempfile, unittest
+import json, os, subprocess, sys, tempfile, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import notify as N
@@ -238,6 +238,133 @@ class WindowsBackend(unittest.TestCase):
         self.assertNotIn("x" * 65, s)
 
 
+class MessageExtraction(unittest.TestCase):
+    def test_flatten_plain_string(self):
+        self.assertEqual(N.flatten_text("hello"), "hello")
+
+    def test_flatten_content_blocks(self):
+        self.assertEqual(
+            N.flatten_text([{"type": "text", "text": "a"}, {"type": "tool_use"},
+                            {"type": "text", "text": "b"}]), "a b")
+
+    def test_flatten_survives_junk(self):
+        for junk in (None, 42, {}, [{"no": "text"}]):
+            self.assertEqual(N.flatten_text(junk), "")
+
+    def test_first_line_strips_markdown(self):
+        self.assertEqual(N.first_line("## **Done** with `it`"), "Done with it")
+
+    def test_first_line_skips_blank_lines_and_code_fences(self):
+        self.assertEqual(N.first_line("\n\n```bash\nrm -rf /\n```"), "rm -rf /")
+
+    def test_truncates_by_character_not_byte(self):
+        """A byte slice would split a multi-byte character mid-codepoint."""
+        out = N.first_line("长" * 200, limit=10)
+        self.assertEqual(out, "长" * 10 + "…")
+        out.encode("utf-8")  # must not raise
+
+    def test_no_ellipsis_when_short_enough(self):
+        self.assertEqual(N.first_line("short", limit=10), "short")
+
+    def test_stop_uses_last_assistant_message(self):
+        self.assertEqual(
+            N.message_for({"last_assistant_message": "Refactored the parser."}, "Stop"),
+            "Refactored the parser.")
+
+    def test_stop_falls_back_when_message_is_empty(self):
+        self.assertEqual(N.message_for({"last_assistant_message": ""}, "Stop"), "Turn finished")
+        self.assertEqual(N.message_for({}, "Stop"), "Turn finished")
+
+    def test_subagent_stop_names_the_agent(self):
+        self.assertEqual(
+            N.message_for({"agent_type": "Explore", "last_assistant_message": ""}, "SubagentStop"),
+            "Explore finished")
+
+    def test_stopfailure_prefers_the_rendered_error(self):
+        """`error` is an enum token; last_assistant_message is human-readable."""
+        self.assertEqual(
+            N.message_for({"error": "rate_limit",
+                           "last_assistant_message": "API Error: Rate limit reached"},
+                          "StopFailure"),
+            "Failed: API Error: Rate limit reached")
+
+    def test_stopfailure_humanises_the_enum_as_last_resort(self):
+        self.assertEqual(N.message_for({"error": "billing_error"}, "StopFailure"),
+                         "Failed: billing error")
+
+    def test_notification_still_uses_message(self):
+        self.assertEqual(N.message_for({"message": "needs permission"}, "Notification"),
+                         "needs permission")
+
+
+class Suppression(unittest.TestCase):
+    def setUp(self):
+        self._real = N.user_is_watching
+        self.addCleanup(setattr, N, "user_is_watching", self._real)
+
+    def _watching(self, value):
+        N.user_is_watching = lambda sid: value
+
+    def test_suppressed_when_watching(self):
+        self._watching(True)
+        self.assertFalse(N.should_notify({"hook_event_name": "Stop"}, UUID))
+
+    def test_notified_when_not_watching(self):
+        self._watching(False)
+        self.assertTrue(N.should_notify({"hook_event_name": "Stop"}, UUID))
+
+    def test_permission_prompts_are_never_suppressed(self):
+        """They block the session; a false suppression would hang it."""
+        self._watching(True)
+        self.assertTrue(N.should_notify(
+            {"hook_event_name": "Notification",
+             "notification_type": "permission_prompt"}, UUID))
+
+    def test_turn_end_kill_switch(self):
+        self._watching(False)
+        os.environ["CC_NOTIFY_NO_TURN_END"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_TURN_END", None)
+        for ev in ("Stop", "SubagentStop", "StopFailure"):
+            self.assertFalse(N.should_notify({"hook_event_name": ev}, UUID), ev)
+        self.assertTrue(N.should_notify(  # must not silence permission prompts
+            {"hook_event_name": "Notification",
+             "notification_type": "permission_prompt"}, UUID))
+
+    def test_watching_fails_open_without_a_session_id(self):
+        self.assertFalse(self._real(""))
+        self.assertFalse(self._real(None))
+
+    def test_watching_respects_the_global_kill_switch(self):
+        os.environ["CC_NOTIFY_NO_SUPPRESS"] = "1"
+        self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_SUPPRESS", None)
+        self.assertFalse(self._real(UUID))
+
+
+class HookProcessContract(unittest.TestCase):
+    SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify.py")
+
+    def _run(self, payload):
+        return subprocess.run(
+            [sys.executable, self.SCRIPT], input=payload, capture_output=True,
+            text=True, timeout=30,
+            env={**os.environ, "CC_NOTIFY_NO_TURN_END": "1", "CC_NOTIFY_NO_SUPPRESS": "1",
+                 "CC_NOTIFY_DRY_RUN": "1"})  # never banner the person running the tests
+
+    def test_stop_hook_active_is_a_no_op(self):
+        """Another Stop hook is continuing the conversation - not a turn end."""
+        r = self._run(json.dumps({"hook_event_name": "Stop", "stop_hook_active": True,
+                                  "session_id": UUID, "cwd": "/x/y"}))
+        self.assertEqual(r.returncode, 0)
+
+    def test_always_exits_zero(self):
+        """Notification hooks are observational. A non-zero exit only produces
+        stderr noise and must never look like an attempt to block a turn."""
+        for payload in ("{}", "not json at all",
+                        json.dumps({"hook_event_name": "StopFailure", "error": "overloaded"})):
+            with self.subTest(payload=payload[:24]):
+                self.assertEqual(self._run(payload).returncode, 0)
+
+
 class PluginPackaging(unittest.TestCase):
     """Guards the plugin manifests. `claude plugin tag` refuses to cut a release
     when plugin.json and the marketplace entry disagree, so drift between them is
@@ -271,6 +398,19 @@ class PluginPackaging(unittest.TestCase):
         h = self._json("hooks", "hooks.json")
         self.assertIn("hooks", h)
         self.assertIn("Notification", h["hooks"])
+
+    def test_turn_end_events_are_registered(self):
+        """Notification alone never fires at turn end - it waits on the idle
+        timer - so a finished 20-second task would otherwise be silent."""
+        h = self._json("hooks", "hooks.json")["hooks"]
+        for event in ("Stop", "StopFailure"):
+            self.assertIn(event, h)
+
+    def test_every_registered_event_runs_the_same_script(self):
+        for event, blocks in self._json("hooks", "hooks.json")["hooks"].items():
+            for b in blocks:
+                for handler in b["hooks"]:
+                    self.assertEqual(handler["args"], ["${CLAUDE_PLUGIN_ROOT}/notify.py"], event)
 
     def test_hook_uses_exec_form_with_the_plugin_root_placeholder(self):
         """Exec form (args present) needs no shell quoting, so an install path

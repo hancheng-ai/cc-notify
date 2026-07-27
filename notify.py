@@ -203,6 +203,83 @@ def trigger_icon():
 
 
 # --------------------------------------------------------------------------
+# Focus suppression - don't banner a session the user is already watching
+# --------------------------------------------------------------------------
+
+DESKTOP_BUNDLE = "com.anthropic.claudefordesktop"
+LSAPPINFO = "/usr/bin/lsappinfo"
+SESSION_STORE = os.path.expanduser(
+    "~/Library/Application Support/Claude/claude-code-sessions")
+
+
+def frontmost_bundle():
+    """Bundle id of the frontmost macOS app, or None.
+
+    `lsappinfo` needs no accessibility permission and raises no TCC prompt,
+    unlike the System Events route other notifiers use. Measured at ~0.02s.
+    """
+    if not IS_MAC or not os.access(LSAPPINFO, os.X_OK):
+        return None
+    try:
+        asn = subprocess.run([LSAPPINFO, "front"], capture_output=True,
+                             text=True, timeout=2).stdout.strip()
+        if not asn:
+            return None
+        out = subprocess.run([LSAPPINFO, "info", "-only", "bundleid", asn],
+                             capture_output=True, text=True, timeout=2).stdout
+    except Exception:
+        return None
+    m = re.search(r'"CFBundleIdentifier"\s*=\s*"([^"]+)"', out or "")
+    return m.group(1) if m else None
+
+
+def foreground_session():
+    """cliSessionId of the desktop session most recently switched to, or None.
+
+    The desktop app stamps lastFocusedAt (epoch ms) into each session record, so
+    the newest one is the tab on screen whenever the app itself is frontmost.
+    """
+    best_ts, best_id = 0, None
+    try:
+        for dirpath, _, names in os.walk(SESSION_STORE):
+            for n in names:
+                if not (n.startswith("local_") and n.endswith(".json")):
+                    continue
+                try:
+                    with open(os.path.join(dirpath, n), encoding="utf-8") as f:
+                        d = json.load(f)
+                except Exception:
+                    continue
+                ts = d.get("lastFocusedAt") or 0
+                if isinstance(ts, (int, float)) and ts > best_ts:
+                    best_ts, best_id = ts, d.get("cliSessionId")
+    except Exception:
+        return None
+    return best_id
+
+
+def user_is_watching(session_id):
+    """True only when THIS session can be established as the one on screen.
+
+    Fails OPEN - returns False, meaning notify - on any uncertainty.
+
+    The dangerous mistake here is suppressing merely because the app is
+    frontmost, when the user is actually reading a DIFFERENT session inside that
+    same app. That is the exact situation this tool exists for, so the desktop
+    path additionally requires this session to be the most recently focused one.
+
+    Terminal hosts always fail open: a frontmost Terminal.app says nothing about
+    which tab or pane holds this session, and wrongly suppressing there could
+    hide a session that is genuinely blocked on you.
+    """
+    if not session_id or os.environ.get("CC_NOTIFY_NO_SUPPRESS"):
+        return False
+    if frontmost_bundle() != DESKTOP_BUNDLE:
+        return False
+    return foreground_session() == session_id
+
+
+# --------------------------------------------------------------------------
 # Command builders - pure functions, so every backend is testable without a
 # desktop session. The runners below are thin wrappers around these.
 # --------------------------------------------------------------------------
@@ -304,6 +381,10 @@ def _run(argv, **kw):
 
 def notify(title, sub, msg, url, group):
     """Post the notification using the best backend this platform offers."""
+    if os.environ.get("CC_NOTIFY_DRY_RUN"):
+        # Escape hatch for the test suite and for debugging: exercise every code
+        # path up to the send without putting banners in someone's face.
+        return
     if IS_MAC:
         tn = _first_executable(TN_PATHS, "terminal-notifier")
         if tn and _run(macos_argv(tn, title, sub, msg, url, group, trigger_icon())):
@@ -330,9 +411,93 @@ def deep_link_supported():
     return IS_MAC or IS_WIN
 
 
+def flatten_text(v):
+    """Reduce a message value to plain text.
+
+    `last_assistant_message` is documented as text, but content in this API is
+    routinely a list of typed blocks, so both shapes are handled rather than
+    assumed. Anything unrecognised degrades to "".
+    """
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list):
+        out = []
+        for b in v:
+            if isinstance(b, str):
+                out.append(b)
+            elif isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                out.append(str(b["text"]))
+        return " ".join(out)
+    if isinstance(v, dict):
+        return flatten_text(v.get("content") or v.get("text") or "")
+    return ""
+
+
+def first_line(s, limit=140):
+    """First meaningful line, lightly de-marked-down, truncated by CHARACTER.
+
+    Byte truncation would split a multi-byte character mid-codepoint, which
+    matters immediately for CJK output.
+    """
+    for raw in str(s).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("```"):
+            continue
+        line = re.sub(r"^[#>\-*•\s]+", "", line)  # heading / quote / bullet
+        line = re.sub(r"[*_`]", "", line).strip()      # inline emphasis
+        if line:
+            return line[:limit] + ("…" if len(line) > limit else "")
+    return ""
+
+
+def message_for(d, event):
+    """The banner body, which differs by what actually happened."""
+    if event in ("Stop", "SubagentStop"):
+        body = first_line(flatten_text(d.get("last_assistant_message")))
+        agent = str(d.get("agent_type") or "").strip()
+        if event == "SubagentStop" and agent:
+            return body or f"{agent} finished"
+        return body or "Turn finished"
+    if event == "StopFailure":
+        # For StopFailure `last_assistant_message` is the rendered error string
+        # ("API Error: Rate limit reached"), while `error` is an enum token
+        # (rate_limit, billing_error, ...). Prefer the readable one, and only
+        # fall back to humanising the token.
+        err = (first_line(flatten_text(d.get("last_assistant_message")))
+               or first_line(flatten_text(d.get("error_details")))
+               or str(d.get("error") or "").replace("_", " "))
+        return f"Failed: {err}" if err else "Turn failed"
+    return str(d.get("message") or "Claude Code needs you").strip()
+
+
+TURN_END = ("Stop", "SubagentStop", "StopFailure")
+
+
+def should_notify(d, session_id):
+    """Whether this event deserves a banner at all.
+
+    Permission prompts always get through: they block the session, so a false
+    suppression would leave it hanging indefinitely. Everything else is
+    informational and can be skipped when you are demonstrably already looking
+    at that session.
+
+    Turn-end events fire on every turn, which is welcome for the long refactor
+    you walked away from and tiresome for a rapid back-and-forth. Per-session
+    grouping means they replace rather than stack, and CC_NOTIFY_NO_TURN_END
+    turns them off outright.
+    """
+    event = str(d.get("hook_event_name") or "Notification")
+    if event in TURN_END and os.environ.get("CC_NOTIFY_NO_TURN_END"):
+        return False
+    if str(d.get("notification_type") or "") == "permission_prompt":
+        return True
+    return not user_is_watching(session_id)
+
+
 def build(d):
     """Turn a hook payload into (title, subtitle, message, deep link, group)."""
-    msg = (str(d.get("message") or "Claude Code needs you").strip())[:180]
+    event = str(d.get("hook_event_name") or "Notification")
+    msg = message_for(d, event).strip()[:180]
 
     # Derive the repo from cwd. Hardcoding a project name here would make every
     # repo's notifications claim to come from whichever one you wrote down.
@@ -414,8 +579,16 @@ def main():
         d = json.load(sys.stdin)
     except Exception:
         d = {}
-    notify(*build(d))
-    return 0
+
+    # Another Stop hook is continuing the conversation, so this is not a real
+    # turn end. Firing here would banner the user mid-loop.
+    if d.get("stop_hook_active"):
+        return 0
+
+    title, sub, msg, url, group = build(d)
+    if should_notify(d, str(d.get("session_id") or "")):
+        notify(title, sub, msg, url, group)
+    return 0  # always 0: this hook is observational and must never block a turn
 
 
 if __name__ == "__main__":

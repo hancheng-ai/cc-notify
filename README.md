@@ -7,8 +7,9 @@ useful. Every banner looks the same, so you can't tell which session is asking
 for you, and clicking one does nothing. You end up polling your sessions by hand
 — which defeats the point of running them in parallel.
 
-This hook makes each notification say **which session** wants you, and makes
-clicking it **jump straight back to that session**.
+This hook makes each notification say **which session** wants you, tells you
+**what happened**, and makes clicking it **jump straight back to that session** —
+while staying quiet about the session you're already looking at.
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -19,14 +20,36 @@ clicking it **jump straight back to that session**.
         click  →  jumps to that session
 ```
 
+## When it fires
+
+| Event | Banner says |
+|---|---|
+| Needs permission, or gone idle | the notification text |
+| **Turn finished** | Claude's closing line, e.g. *"Refactored the parser."* |
+| **Turn failed** | *"Failed: API Error: Rate limit reached"* |
+
+Turn-end events matter because `Notification` alone never fires when a turn
+simply completes — it waits on an idle timer. Kick off a 30-second task, look
+away, and without a `Stop` hook nothing tells you it's done.
+
+**It stays quiet about the session you're watching.** If the Claude desktop app
+is frontmost *and* the event belongs to the session currently on screen, the
+banner is skipped — you can already see it. This is deliberately narrow: a
+frontmost app is not enough, because with several sessions open in one app the
+one that needs you is usually *not* the one you're reading. When it can't
+establish that this exact session is on screen, it notifies. Permission prompts
+are never suppressed, since a wrong guess there would leave a session hanging.
+
 ## Platform support
 
 | | macOS | Linux | Windows |
 |---|:---:|:---:|:---:|
 | Session name as the title | ✅ | ✅ | ✅ |
 | Repo + permission mode | ✅ | ✅ *(in body)* | ✅ |
+| Turn finished / failed | ✅ | ✅ | ✅ |
 | One live banner per session | ✅ | ✅ | ✅ |
 | Click to jump to the session | ✅ | ➖ | ⚠️ |
+| Quiet when you're watching | ✅ | ➖ | ➖ |
 | Icon of the triggering app | ✅ | ➖ | ➖ |
 | Backend | `terminal-notifier`, falling back to `osascript` | `notify-send` | PowerShell toast |
 | Verified on real hardware | ✅ | ⚠️ | ⚠️ |
@@ -73,8 +96,8 @@ claude plugin install cc-notify@hancheng-ai
 Or from inside Claude Code, `/plugin marketplace add hancheng-ai/cc-notify`
 then `/plugin install cc-notify@hancheng-ai`, followed by `/reload-plugins`.
 
-The plugin adds a single `Notification` hook and **no model context** —
-`claude plugin details cc-notify` reports it as
+The plugin registers `Notification`, `Stop` and `StopFailure` hooks and adds
+**no model context** — `claude plugin details cc-notify` reports them as
 `harness-only — no model context cost`, so it costs nothing per session.
 
 Updates come through `claude plugin update cc-notify`.
@@ -110,6 +133,19 @@ python3 ~/.claude/hooks/notify.py --self-test
 That prints what it resolved — platform, session, title, deep link, icon,
 backend — and sends a real notification for your most recent session.
 
+### Turn it down
+
+Three environment variables, no config file needed:
+
+| Variable | Effect |
+|---|---|
+| `CC_NOTIFY_NO_TURN_END=1` | Stop notifying when turns finish or fail; keep permission and idle prompts |
+| `CC_NOTIFY_NO_SUPPRESS=1` | Always notify, even for the session you're looking at |
+| `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
+
+Per-session grouping means a chatty session replaces its own banner rather than
+stacking, so turn-end notifications stay bounded at one per session.
+
 ### Narrow which notifications you get
 
 By default the hook fires for every notification type. To limit it, add a
@@ -128,21 +164,30 @@ Available types include `permission_prompt`, `idle_prompt`, `auth_success`,
 Everything is local, and it is worth being explicit about that because the hook
 reads your transcripts:
 
-- **It reads transcript files** (`~/.claude/projects/**.jsonl`) for one purpose:
-  recovering the session name. Only the last 512 KB of a file is read, and only
-  `custom-title` / `ai-title` entries are used. Conversation content is never
-  parsed or displayed.
+- **It reads transcript files** (`~/.claude/projects/**.jsonl`) to recover the
+  session name. Only the last 512 KB of a file is read, and only `custom-title` /
+  `ai-title` entries are parsed from it.
+- **Claude's closing line is shown on turn-end banners.** This is conversation
+  content, and you should know that before installing. It comes from the hook
+  payload's `last_assistant_message` — not from scraping the transcript — is
+  reduced to a single line of at most 140 characters, and is never stored or
+  sent anywhere. Set `CC_NOTIFY_NO_TURN_END=1` to switch those banners off
+  entirely.
+- **It reads the desktop app's session index** (`~/Library/Application
+  Support/Claude/claude-code-sessions/**.json`) on macOS, for one field —
+  `lastFocusedAt` — to tell whether the session that fired is the one you're
+  looking at. No conversation content lives in those files.
 - **No network access whatsoever.** There are no HTTP calls, no telemetry, no
   analytics, no crash reporting. The only URL-shaped string is the local
   `claude://` link handed to your OS.
 - **What it writes:** cached app-icon PNGs under
   `~/.claude/.cache/cc-notify-icons/` (macOS only). The installer
   additionally writes `~/.claude/settings.json`, backing it up first.
-- **What it runs:** `ps`, `sips`, `terminal-notifier`, `osascript` (macOS);
-  `notify-send` (Linux); `powershell` (Windows). Nothing else.
-- **Your session names appear on screen.** If a session is named after something
-  sensitive, that name will be visible in notifications — worth knowing before
-  you screen-share.
+- **What it runs:** `ps`, `sips`, `lsappinfo`, `terminal-notifier`, `osascript`
+  (macOS); `notify-send` (Linux); `powershell` (Windows). Nothing else.
+- **Your session names and Claude's last line appear on screen.** If either is
+  sensitive it will be visible in notifications — worth knowing before you
+  screen-share.
 - `--self-test` prints local session details; redact before pasting into a
   public issue.
 
@@ -203,7 +248,7 @@ Some smaller decisions worth knowing:
 ```
 .claude-plugin/plugin.json       plugin manifest
 .claude-plugin/marketplace.json  self-hosted marketplace (source: "./")
-hooks/hooks.json                 the Notification hook, exec form
+hooks/hooks.json                 Notification + Stop + StopFailure, exec form
 notify.py                        the hook itself
 install.py                       manual (non-plugin) installer
 test_backends.py                 test suite
@@ -218,12 +263,17 @@ The repo is both the plugin and its own marketplace, which is why `source` is
 python3 test_backends.py
 ```
 
-43 tests covering title recovery (custom over generated, last-wins, truncated
-JSON, tail-read boundary), payload handling, platform gating of the deep link,
-the exact argv / toast XML each backend emits — including injection attempts
-through session names — and the packaging itself: manifest/marketplace version
-agreement, exec-form hook shape, and that no component directory has drifted
+66 tests covering title recovery (custom over generated, last-wins, truncated
+JSON, tail-read boundary), message extraction from every event shape, focus
+suppression (including that a *different* session in the same app is never
+suppressed, and that permission prompts never are), the exact argv / toast XML
+each backend emits — including injection attempts through session names — and
+the packaging itself: manifest/marketplace version agreement, exec-form hook
+shape, turn-end event registration, and that no component directory has drifted
 into `.claude-plugin/`.
+
+The suite posts no real notifications and never blocks: it asserts the hook
+exits 0 on malformed input, on `stop_hook_active`, and on garbage stdin.
 
 Manifests are additionally checked with the real validator:
 
