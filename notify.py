@@ -232,7 +232,12 @@ def rebadged_notifier(tn_binary):
     Returns None on any problem, so the caller simply falls back to the shared
     terminal-notifier - a wrong icon is much better than no notification.
     """
-    if not IS_MAC or os.environ.get("CC_NOTIFY_NO_REBADGE"):
+    # OPT-IN, deliberately. A re-badged bundle posts under a bundle id macOS has
+    # never authorized for notifications, and an unauthorized sender can be
+    # dropped silently - which is the one failure this tool must never have. A
+    # wrong icon is cosmetic; missing notifications are not. Enable with
+    # CC_NOTIFY_REBADGE=1 once you have confirmed banners still appear.
+    if not IS_MAC or not os.environ.get("CC_NOTIFY_REBADGE"):
         return None
     app = os.path.join(_rebadge_home(), "cc-notify.app")
     binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
