@@ -10,29 +10,49 @@ backed up before any change.
     python3 install.py --uninstall  remove the hook and its registration
     python3 install.py --dry-run    show what would change, touch nothing
 """
-import sys, os, json, shutil, subprocess, datetime
+import sys, os, json, shutil, datetime
 
 HOME = os.path.expanduser("~")
 HOOKS_DIR = os.path.join(HOME, ".claude", "hooks")
 TARGET = os.path.join(HOOKS_DIR, "notify.py")
 SETTINGS = os.path.join(HOME, ".claude", "settings.json")
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notify.py")
-COMMAND = f"/usr/bin/python3 {TARGET}"
-TN_PATHS = ("/usr/local/bin/terminal-notifier", "/opt/homebrew/bin/terminal-notifier")
 
+IS_MAC = sys.platform == "darwin"
+IS_WIN = sys.platform in ("win32", "cygwin")
+IS_LINUX = sys.platform.startswith("linux")
 DRY = "--dry-run" in sys.argv
 
 
+def interpreter():
+    """Pick the interpreter the hook will be launched with.
+
+    On macOS and Linux prefer the absolute system python: a GUI app spawns hooks
+    with a nearly empty PATH, and a virtualenv path would break the moment that
+    environment is rebuilt or switched. On Windows there is no such fixed
+    location, so the current interpreter is the best available answer.
+    """
+    if not IS_WIN and os.access("/usr/bin/python3", os.X_OK):
+        return "/usr/bin/python3"
+    return sys.executable or "python3"
+
+
+def quoted(p):
+    return f'"{p}"' if " " in p else p
+
+
+COMMAND = f"{quoted(interpreter())} {quoted(TARGET)}"
+
+
 def say(msg, ok=None):
-    mark = {True: "  ok  ", False: " warn ", None: "      "}[ok]
-    print(f"[{mark}] {msg}")
+    print(f"[{ {True: '  ok  ', False: ' warn ', None: '      '}[ok] }] {msg}")
 
 
 def load_settings():
     if not os.path.isfile(SETTINGS):
         return {}
     try:
-        with open(SETTINGS) as f:
+        with open(SETTINGS, encoding="utf-8") as f:
             return json.load(f) or {}
     except Exception as e:
         print(f"\n{SETTINGS} is not valid JSON ({e}).")
@@ -51,7 +71,7 @@ def save_settings(data):
         shutil.copy2(SETTINGS, backup)
         say(f"backed up settings.json -> {os.path.basename(backup)}", True)
     tmp = SETTINGS + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     os.replace(tmp, SETTINGS)  # atomic; never leaves a half-written settings file
@@ -68,33 +88,52 @@ def mentions_us(block):
     return False
 
 
-def check_terminal_notifier():
-    found = next((p for p in TN_PATHS if os.access(p, os.X_OK)), None)
-    if found:
-        say(f"terminal-notifier: {found}", True)
-        return
-    say("terminal-notifier not found", False)
-    print("         Without it you still get notifications, but clicking one")
-    print("         will not jump to the session. Install with:")
-    print("             brew install terminal-notifier")
+def check_dependencies():
+    """Report the notification backend this platform will use."""
+    if IS_MAC:
+        for p in ("/usr/local/bin/terminal-notifier", "/opt/homebrew/bin/terminal-notifier"):
+            if os.access(p, os.X_OK):
+                return say(f"terminal-notifier: {p}", True)
+        if shutil.which("terminal-notifier"):
+            return say(f"terminal-notifier: {shutil.which('terminal-notifier')}", True)
+        say("terminal-notifier not found", False)
+        print("         Notifications still work, but clicking one will not jump")
+        print("         to the session. Install with:")
+        print("             brew install terminal-notifier")
+    elif IS_LINUX:
+        found = shutil.which("notify-send")
+        if found:
+            return say(f"notify-send: {found}", True)
+        say("notify-send not found - no notifications will appear", False)
+        print("         Install libnotify:")
+        print("             sudo apt install libnotify-bin     # Debian/Ubuntu")
+        print("             sudo dnf install libnotify         # Fedora")
+    elif IS_WIN:
+        found = shutil.which("powershell") or shutil.which("pwsh")
+        if found:
+            return say(f"powershell: {found}", True)
+        say("powershell not found - no notifications will appear", False)
+    else:
+        say(f"unsupported platform: {sys.platform}", False)
 
 
 def install():
-    if sys.platform != "darwin":
-        print("macOS only - this builds on macOS notifications.")
+    if not (IS_MAC or IS_LINUX or IS_WIN):
+        print(f"Unsupported platform: {sys.platform}")
         return 1
     if not os.path.isfile(SRC):
         print(f"Cannot find {SRC}")
         return 1
 
-    check_terminal_notifier()
+    check_dependencies()
 
     if DRY:
         say(f"would copy notify.py -> {TARGET}")
     else:
         os.makedirs(HOOKS_DIR, exist_ok=True)
         shutil.copy2(SRC, TARGET)
-        os.chmod(TARGET, 0o755)
+        if not IS_WIN:
+            os.chmod(TARGET, 0o755)
         say(f"installed {TARGET}", True)
 
     data = load_settings()
@@ -111,7 +150,7 @@ def install():
     save_settings(data)
 
     print("\nDone. Restart Claude Code, then verify with:")
-    print(f"    python3 {TARGET} --self-test")
+    print(f"    {interpreter()} {TARGET} --self-test")
     return 0
 
 
@@ -139,8 +178,7 @@ def uninstall():
         else:
             os.remove(TARGET)
             say(f"deleted {TARGET}", True)
-    print("\nUninstalled. terminal-notifier was left alone "
-          "(brew uninstall terminal-notifier if you want it gone).")
+    print("\nUninstalled. The notification backend was left installed.")
     return 0
 
 
