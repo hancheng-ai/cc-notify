@@ -302,6 +302,26 @@ claude plugin validate .claude-plugin/plugin.json --strict
 claude plugin validate .claude-plugin/marketplace.json --strict
 ```
 
+## Claude Cowork
+
+**Not supported.** Cowork is a different surface from Claude Code, and three
+things this plugin depends on do not hold there:
+
+- Cowork keeps transcripts in the familiar `.claude/projects/**.jsonl` shape,
+  but inside a session-scoped `.claude` home — and those transcripts carry no
+  `custom-title` / `ai-title` records, so session titles cannot be recovered.
+  Every banner would degrade to a path fragment.
+- No documented deep link opens an *existing* Cowork session. The published
+  Cowork links (`claude://cowork/new`) all create one, so click-to-jump has no
+  target.
+- Whether plugin hooks fire in Cowork at all, and whether they execute on the
+  host or inside Cowork's isolated VM, is undocumented. If it is the VM, no
+  desktop notifier can reach the host's Notification Center.
+
+If you'd like this supported, the useful thing is data: run a Cowork session
+with any plugin that ships a hook and report whether it fires, and where. Issues
+welcome.
+
 ## Limitations
 
 - **`claude://resume` is internal and undocumented.** It works today and was
