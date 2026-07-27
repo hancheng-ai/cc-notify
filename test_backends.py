@@ -475,7 +475,9 @@ class DuplicateSessionEntries(unittest.TestCase):
         self.addCleanup(setattr, N, "desktop_records", self._real)
 
     def _records(self, pairs):
-        N.desktop_records = lambda: [(sid, cli, {}) for sid, cli in pairs]
+        """pairs: (sessionId, cliSessionId) or (sessionId, cliSessionId, archived)"""
+        N.desktop_records = lambda: [
+            (p[0], p[1], {"isArchived": p[2] if len(p) > 2 else False}) for p in pairs]
 
     def test_no_duplicate_when_the_canonical_entry_is_the_only_one(self):
         self._records([(f"local_{UUID}", UUID)])
@@ -502,13 +504,29 @@ class DuplicateSessionEntries(unittest.TestCase):
         self._records([(f"local_{UUID}", UUID)])
         self.assertEqual(N.duplicate_pairs(), [])
 
-    def test_pair_without_a_canonical_entry_yet(self):
-        a = "local_aaaaaaaa-0000-4000-8000-000000000000"
-        b = "local_bbbbbbbb-0000-4000-8000-000000000000"
-        self._records([(a, UUID), (b, UUID)])
-        (_, canonical, others), = N.duplicate_pairs()
-        self.assertIsNone(canonical)
-        self.assertCountEqual(others, [a, b])
+    def test_converged_pair_is_no_longer_reported(self):
+        """Archiving the native entry resolves the pair for good - nothing
+        resurrects it, unlike the canonical one."""
+        native = "local_deadbeef-0000-4000-8000-000000000000"
+        self._records([(f"local_{UUID}", UUID, False), (native, UUID, True)])
+        self.assertEqual(N.duplicate_pairs(), [])
+        self.assertFalse(N.would_duplicate(UUID))
+
+    def test_archived_canonical_still_counts_as_outstanding(self):
+        """Archiving the CANONICAL one does not stick: the next click
+        un-archives it and the second row comes back."""
+        native = "local_deadbeef-0000-4000-8000-000000000000"
+        self._records([(f"local_{UUID}", UUID, True), (native, UUID, False)])
+        self.assertEqual(len(N.duplicate_pairs()), 1)
+        self.assertTrue(N.would_duplicate(UUID))
+
+    def test_a_lone_native_entry_is_not_a_duplicate(self):
+        """One row is not a pair. Clicking would create the second - that is
+        what would_duplicate() answers, and it must not be reported as an
+        existing duplicate."""
+        self._records([("local_deadbeef-0000-4000-8000-000000000000", UUID)])
+        self.assertEqual(N.duplicate_pairs(), [])
+        self.assertTrue(N.would_duplicate(UUID))
 
 
 class DeepLinkOptOut(unittest.TestCase):

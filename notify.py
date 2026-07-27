@@ -359,39 +359,54 @@ def desktop_records():
 
 
 def would_duplicate(session_id):
-    """True if clicking a link for this session would add a row to the session list.
+    """True if clicking a link for this session would add a row to the list.
 
-    The deep link imports a CLI session as `local_<uuid>`. When the desktop app
-    already tracks that conversation under a natively-generated id instead, the
-    import produces a SECOND entry for the same conversation.
+    The deep link imports a CLI session as `local_<uuid>`. Four cases:
 
-    This is a one-time cost per session, not per click - once `local_<uuid>`
-    exists, later clicks log "already imported" and add nothing. Archiving that
-    entry does not help either: the next click un-archives it.
+      canonical present, live      no - the click just navigates
+      canonical present, archived  YES - the click un-archives it, so a row returns
+      canonical absent, others     YES - the import mints a second entry
+      nothing tracked at all       no - the import creates the first entry
     """
     if not IS_MAC or not session_id:
         return False
     canonical = f"local_{session_id}"
-    same = [sid for sid, cli, _ in desktop_records() if cli == session_id]
-    return bool(same) and canonical not in same
+    same = [(sid, d) for sid, cli, d in desktop_records() if cli == session_id]
+    if not same:
+        return False  # a fresh CLI session: this becomes its only entry
+    for sid, d in same:
+        if sid == canonical:
+            return bool(d.get("isArchived"))
+    return True
 
 
 def duplicate_pairs():
-    """Conversations tracked under more than one desktop entry.
+    """Conversations that still show more than one row.
 
-    Returns (cliSessionId, canonical_id_or_None, [other_ids]).
+    Returns (cliSessionId, canonical_id_or_None, [live_other_ids]).
+
+    An entry you archived is resolved and no longer counted - with one
+    asymmetry that matters. Archiving the CANONICAL entry does not stick, since
+    the next click un-archives it, so a pair stays outstanding as long as any
+    non-canonical entry is still live.
     """
     by_cli = {}
     for sid, cli, d in desktop_records():
         by_cli.setdefault(cli, []).append((sid, d))
     pairs = []
     for cli, entries in by_cli.items():
-        if len(entries) < 2:
-            continue
         canonical = f"local_{cli}"
         ids = [sid for sid, _ in entries]
-        pairs.append((cli, canonical if canonical in ids else None,
-                      [i for i in ids if i != canonical]))
+        if canonical not in ids:
+            # Only a natively-tracked entry exists. That is one row, not a
+            # duplicate - clicking would create the second, which is what
+            # would_duplicate() answers.
+            continue
+        others = [sid for sid, d in entries
+                  if sid != canonical and not d.get("isArchived")]
+        if not others:
+            continue  # converged: everything but the canonical is archived
+        pairs.append((cli, canonical, others))
     return pairs
 
 
