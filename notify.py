@@ -489,6 +489,20 @@ def should_notify(d, session_id):
     event = str(d.get("hook_event_name") or "Notification")
     if event in TURN_END and os.environ.get("CC_NOTIFY_NO_TURN_END"):
         return False
+
+    # Stop fires once per PAUSE, not once per turn. When the model backgrounds
+    # subagents it fires again each time it stops to wait for them - measured at
+    # three fires for a single prompt, each with a different prompt_id. Only the
+    # last one has an empty background_tasks, so the earlier fires would claim
+    # "turn finished" while work is still running. Deduping on session_id or
+    # prompt_id does not help: the former is identical across all three and the
+    # latter differs across all three.
+    #
+    # Deliberately Stop-only. On SubagentStop this array describes the PARENT
+    # session, so one subagent finishing while other background work continues
+    # is still a genuine completion worth reporting.
+    if event == "Stop" and (d.get("background_tasks") or []):
+        return False
     if str(d.get("notification_type") or "") == "permission_prompt":
         return True
     return not user_is_watching(session_id)
@@ -577,18 +591,28 @@ def main():
         return self_test()
     try:
         d = json.load(sys.stdin)
+        if not isinstance(d, dict):
+            d = {}  # valid JSON that isn't an object, e.g. a bare array
     except Exception:
         d = {}
 
-    # Another Stop hook is continuing the conversation, so this is not a real
-    # turn end. Firing here would banner the user mid-loop.
-    if d.get("stop_hook_active"):
-        return 0
-
-    title, sub, msg, url, group = build(d)
-    if should_notify(d, str(d.get("session_id") or "")):
-        notify(title, sub, msg, url, group)
-    return 0  # always 0: this hook is observational and must never block a turn
+    # Everything below is wrapped, because for Stop and SubagentStop the exit
+    # code is not cosmetic: exit 2 feeds stderr back to the model and continues
+    # the turn, which lets a crashing notifier silently rewrite the user's
+    # session. Nothing this script does is worth that risk, so no failure is
+    # allowed to escape. Nothing is printed to stdout either - stdout beginning
+    # with "{" is parsed as a control decision.
+    try:
+        # True when this turn is a continuation that a stop hook itself caused
+        # by blocking - so it is not a real turn end, and firing would banner
+        # the user mid-loop.
+        if d.get("stop_hook_active"):
+            return 0
+        if should_notify(d, str(d.get("session_id") or "")):
+            notify(*build(d))
+    except Exception:
+        pass
+    return 0  # observational hook: must never block or alter a turn
 
 
 if __name__ == "__main__":

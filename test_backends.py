@@ -330,6 +330,30 @@ class Suppression(unittest.TestCase):
             {"hook_event_name": "Notification",
              "notification_type": "permission_prompt"}, UUID))
 
+    def test_stop_is_silent_while_background_work_is_still_running(self):
+        """Stop fires once per pause, not once per turn: with backgrounded
+        subagents it fires repeatedly, and only the last has no background work.
+        Reporting the earlier ones would claim the turn finished when it hadn't."""
+        self._watching(False)
+        running = {"hook_event_name": "Stop",
+                   "background_tasks": [{"status": "running", "id": "t1"}]}
+        self.assertFalse(N.should_notify(running, UUID))
+
+    def test_stop_reports_once_background_work_is_done(self):
+        self._watching(False)
+        for tasks in ([], None):
+            payload = {"hook_event_name": "Stop", "background_tasks": tasks}
+            self.assertTrue(N.should_notify(payload, UUID), tasks)
+        self.assertTrue(N.should_notify({"hook_event_name": "Stop"}, UUID))  # key absent
+
+    def test_subagent_stop_is_not_gated_on_background_tasks(self):
+        """That array describes the PARENT session, so a subagent finishing
+        while other background work continues is still a real completion."""
+        self._watching(False)
+        self.assertTrue(N.should_notify(
+            {"hook_event_name": "SubagentStop",
+             "background_tasks": [{"status": "running"}]}, UUID))
+
     def test_watching_fails_open_without_a_session_id(self):
         self.assertFalse(self._real(""))
         self.assertFalse(self._real(None))

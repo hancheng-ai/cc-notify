@@ -1,7 +1,7 @@
 {
   "name": "cc-notify",
   "description": "Session-aware, clickable desktop notifications for Claude Code. Each notification names the session that wants you, shows its repo and permission mode, replaces that session's previous banner instead of stacking, and on macOS/Windows jumps straight back to the session when clicked.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": {
     "name": "Hancheng Wang"
   },
