@@ -1,4 +1,4 @@
-# claude-code-notify
+# cc-notify
 
 Session-aware, clickable desktop notifications for [Claude Code](https://claude.com/claude-code).
 
@@ -66,26 +66,26 @@ No Python packages. Standard library only.
 ### As a plugin (recommended)
 
 ```bash
-claude plugin marketplace add hancheng-ai/claude-code-notify
-claude plugin install claude-code-notify@hancheng-ai
+claude plugin marketplace add hancheng-ai/cc-notify
+claude plugin install cc-notify@hancheng-ai
 ```
 
-Or from inside Claude Code, `/plugin marketplace add hancheng-ai/claude-code-notify`
-then `/plugin install claude-code-notify@hancheng-ai`, followed by `/reload-plugins`.
+Or from inside Claude Code, `/plugin marketplace add hancheng-ai/cc-notify`
+then `/plugin install cc-notify@hancheng-ai`, followed by `/reload-plugins`.
 
 The plugin adds a single `Notification` hook and **no model context** —
-`claude plugin details claude-code-notify` reports it as
+`claude plugin details cc-notify` reports it as
 `harness-only — no model context cost`, so it costs nothing per session.
 
-Updates come through `claude plugin update claude-code-notify`.
+Updates come through `claude plugin update cc-notify`.
 
 ### Or manually
 
 If you'd rather not use the plugin system:
 
 ```bash
-git clone https://github.com/hancheng-ai/claude-code-notify.git
-cd claude-code-notify
+git clone https://github.com/hancheng-ai/cc-notify.git
+cd cc-notify
 python3 install.py
 ```
 
@@ -136,7 +136,7 @@ reads your transcripts:
   analytics, no crash reporting. The only URL-shaped string is the local
   `claude://` link handed to your OS.
 - **What it writes:** cached app-icon PNGs under
-  `~/.claude/.cache/claude-code-notify-icons/` (macOS only). The installer
+  `~/.claude/.cache/cc-notify-icons/` (macOS only). The installer
   additionally writes `~/.claude/settings.json`, backing it up first.
 - **What it runs:** `ps`, `sips`, `terminal-notifier`, `osascript` (macOS);
   `notify-send` (Linux); `powershell` (Windows). Nothing else.
@@ -252,7 +252,7 @@ claude plugin validate .claude-plugin/marketplace.json --strict
 If you installed the plugin:
 
 ```bash
-claude plugin uninstall claude-code-notify
+claude plugin uninstall cc-notify
 ```
 
 If you installed manually:

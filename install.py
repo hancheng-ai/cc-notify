@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Installer for claude-code-notify.
+"""Installer for cc-notify.
 
 Copies the hook into ~/.claude/hooks/ and registers it as a Notification hook in
 ~/.claude/settings.json, merging into whatever is already there rather than
@@ -127,14 +127,14 @@ def check_plugin_conflict(data):
     installs. So having both active means two notifications for every event.
     """
     enabled = data.get("enabledPlugins") or {}
-    hits = [k for k in enabled if k.split("@")[0] == "claude-code-notify" and enabled[k]]
+    hits = [k for k in enabled if k.split("@")[0] == "cc-notify" and enabled[k]]
     if not hits:
         return
     say(f"the plugin is also installed: {', '.join(hits)}", False)
     print("         Plugin hooks MERGE with settings.json hooks, so you would get")
     print("         two notifications per event. Pick one:")
-    print("             claude plugin uninstall claude-code-notify   # keep this install")
-    print("             python3 install.py --uninstall              # keep the plugin")
+    print("             claude plugin uninstall cc-notify   # keep this install")
+    print("             python3 install.py --uninstall      # keep the plugin")
 
 
 def install():

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""claude-code-notify — session-aware, clickable desktop notifications for Claude Code.
+"""cc-notify — session-aware, clickable desktop notifications for Claude Code.
 
 Run several Claude Code sessions at once and the built-in notifications become
 useless: every banner looks identical, so you cannot tell which session wants
@@ -40,7 +40,7 @@ Privacy: everything is local. The transcript is read only to recover the session
 name, nothing is transmitted anywhere, and there is no telemetry. The only
 network-shaped string in this file is a `claude://` URL handed to the OS.
 
-MIT licensed. https://github.com/hancheng-ai/claude-code-notify
+MIT licensed. https://github.com/hancheng-ai/cc-notify
 """
 import sys, json, os, re, shutil, subprocess, urllib.parse
 from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_attr
@@ -71,7 +71,7 @@ MAC_PS, MAC_SIPS = "/bin/ps", "/usr/bin/sips"
 # directory; standalone installs fall back to the usual cache location.
 ICONS = (os.path.join(os.environ["CLAUDE_PLUGIN_DATA"], "icons")
          if os.environ.get("CLAUDE_PLUGIN_DATA")
-         else os.path.expanduser("~/.claude/.cache/claude-code-notify-icons"))
+         else os.path.expanduser("~/.claude/.cache/cc-notify-icons"))
 
 
 def _first_executable(paths, *names):
@@ -270,7 +270,7 @@ def windows_script(title, sub, msg, url, group):
         f"$x.LoadXml({psq(toast)})\n"
         "$t=New-Object Windows.UI.Notifications.ToastNotification $x\n"
         f"$t.Tag={psq(tag)}\n"
-        "$t.Group='claude-code-notify'\n"
+        "$t.Group='cc-notify'\n"
         "$id='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'\n"
         "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show($t)\n"
     )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for claude-code-notify.
+"""Tests for cc-notify.
 
 The command builders are pure functions precisely so that the Linux and Windows
 backends can be verified without a Linux or Windows desktop: these assert the

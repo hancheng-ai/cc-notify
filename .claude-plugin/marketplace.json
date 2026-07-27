@@ -7,7 +7,7 @@
   },
   "plugins": [
     {
-      "name": "claude-code-notify",
+      "name": "cc-notify",
       "description": "Session-aware, clickable desktop notifications for Claude Code. Know which session needs you, click to jump straight back.",
       "version": "1.1.0",
       "author": {
@@ -15,7 +15,7 @@
       },
       "category": "productivity",
       "source": "./",
-      "homepage": "https://github.com/hancheng-ai/claude-code-notify"
+      "homepage": "https://github.com/hancheng-ai/cc-notify"
     }
   ]
 }
