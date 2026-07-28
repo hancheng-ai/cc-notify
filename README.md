@@ -169,7 +169,7 @@ Three environment variables, no config file needed:
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but post nothing — for debugging |
 | `CC_NOTIFY_NO_REBADGE=1` | Post as the shared `terminal-notifier`. **Try this first if you see no notifications at all** — a bundle id macOS has not authorized is dropped silently |
 | `CC_NOTIFY_NO_DEEPLINK=1` | Drop click-to-jump entirely |
-| `CC_NOTIFY_ALWAYS_DEEPLINK=1` | Always navigate on click, accepting that some clicks add a session row |
+| `CC_NOTIFY_ALWAYS_DEEPLINK=1` | Skip the row lookup and send the raw CLI id, as older versions did. Reproduces the duplicate-row import — for diagnosing the click path |
 
 Per-session grouping means a chatty session replaces its own banner rather than
 stacking, so turn-end notifications stay bounded at one per session.
@@ -234,63 +234,61 @@ read, because transcripts routinely reach tens of megabytes — a 6.4 MB
 transcript resolves in about 0.1 s.
 
 **Clicking uses an internal deep link.** `claude://resume?session=<uuid>` is
-handled by the Claude desktop app: it imports the CLI session as a desktop
-session named `local_<uuid>` and navigates there. The session id is checked
-against a UUID pattern first, because the app silently discards anything that
-doesn't match.
+handled by the Claude desktop app, and the uuid it wants is a **desktop row's
+own id**, not a CLI session id. The app mints a `local_<uuid>` row per
+conversation and stores the CLI id separately, in a `cliSessionId` field; the
+two are equal for only a minority of rows. So the click resolves the CLI id the
+banner carries to the row that actually holds it, and navigates to *that*. The
+id is checked against a UUID pattern first, because the app silently discards
+anything that doesn't match.
 
-> **Known caveat — the first click can add a session entry.** If the desktop app
-> already tracks that conversation under a natively-generated id, the import
-> creates a **second** row pointing at the same conversation.
+Measured, on a real 44-conversation store: only 6 rows had the two ids equal —
+and those 6 were exactly the ones whose banners had ever navigated. For the
+other 38 the old code saw "a row exists, but not the one I expected" and
+withheld the click permanently. It read as flakiness; it was 86% deterministic
+failure. Resolving to the row takes it to 42 of 44.
+
+> **The click is resolved when you click it, not when it is posted.** The banner
+> carries a command rather than a URL (`-execute`, not `-open`), and that command
+> does the CLI-id-to-row lookup at the moment of the click.
 >
-> It is a **one-time cost per session**, not per click: once `local_<uuid>`
-> exists, later clicks log *"already imported"* and add nothing. Sessions the app
-> already lists as `local_<uuid>` never duplicate at all. History is never
-> affected — both rows point at the same transcript.
+> Deciding at post time cannot work. A banner outlives the state it was posted
+> under — sitting in Notification Center for a day, still holding yesterday's
+> answer, still one click from acting on it. Resolving late means a banner from
+> last week routes correctly today.
 >
-> **Archiving the extra row does not stick.** The next click un-archives it
-> (measured: `isArchived` flips back to `false`). So the durable fix is to
-> *converge* rather than clean: give the `local_<uuid>` entry the name you want
-> and archive the other one. Every future click resolves there, leaving one
-> correctly-named row.
+> **Two cases decline to navigate**, and both raise the app instead so the click
+> still gets you to Claude:
 >
-> **So the click is resolved when you click it, not when it is posted.** The
-> banner carries a command rather than a URL (`-execute`, not `-open`), and that
-> command re-checks the current state at the moment of the click: navigate if
-> that adds no row, otherwise just raise the app and let you pick the session.
-> Either way you get to Claude; you only lose the jump when taking it would
-> litter.
+> - **No tracked row.** Nothing to resolve to, and guessing is what used to
+>   create the duplicates: passing an unresolved CLI id asks the app to import a
+>   conversation it may already be showing. The import lands first, the app
+>   writes its own row after, and one conversation ends up with two — the
+>   untitled strays, recognisable in the store by `lastActivityAt == createdAt`.
+> - **The only row is archived.** Following the link would un-archive it, putting
+>   a row back into a list you deliberately cleared.
 >
-> Deciding at post time cannot work, and that is the whole point. A banner
-> outlives the state it was posted under — sitting in Notification Center for a
-> day, still holding yesterday's answer, still one click from acting on it.
-> Clicking an old banner was exactly how this resurfaced after it was
-> "fixed".
->
-> It is also **self-healing**. Converge a session once — name its `local_<uuid>`
-> entry, archive the other, as `--doctor` explains — and its click-to-jump comes
-> back, *including on banners posted before you converged it*.
->
-> `python3 notify.py --doctor` lists what is still un-converged.
-> `CC_NOTIFY_ALWAYS_DEEPLINK=1` always navigates, rows and all.
+> `python3 notify.py --doctor` reports what will and won't resolve.
+> `CC_NOTIFY_ALWAYS_DEEPLINK=1` skips the lookup and sends the raw CLI id, which
+> is how you reproduce the old importing behaviour when diagnosing this code.
 >
 > **Sessions running in a terminal never follow the link at all.** `claude://`
 > only ever opens the desktop app, so for a session hosted in iTerm or
 > Terminal the link would not bring you back to it — it would import a *copy*
 > into the desktop app and land you there, leaving the real session running
-> where you left it. Those clicks raise the hosting terminal instead. The
-> duplicate check alone does not catch this: it correctly reports that no
-> second row appears, being blind to the surface being wrong.
+> where you left it. Those clicks raise the hosting terminal instead.
 >
 > The host is detected from process ancestry and baked into the banner at post
-> time — and unlike the duplicate check, that is right, because a session
+> time — and unlike the row lookup, baking that in is right, because a session
 > cannot move from iTerm to the desktop app. macOS offers no way to address the
 > specific tab, so you get the app, not the pane.
 >
-> This was originally documented here as "verified idempotent". That was wrong,
-> and wrong in an instructive way: the test only ever fired at a session whose
-> record the test itself had just created, then generalised from "no third row
-> appeared" to "never duplicates".
+> Two earlier versions of this section were confidently wrong, in the same way
+> each time: generalising from a sample that couldn't show the failure. First
+> "verified idempotent", from a test that only ever fired at a session whose
+> record it had just created. Then a duplicate check built on the assumption
+> that the link took a CLI id — which held for the 6 rows where the two ids
+> happen to coincide, and silently broke the other 38.
 
 **On macOS it posts under its own identity.** macOS takes a banner's icon — and
 its Notification Center grouping — from the *sending* application, so every tool

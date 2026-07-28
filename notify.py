@@ -21,15 +21,20 @@ Three things make this work, none of them obvious:
    routinely reach tens of megabytes.
 
 2. Clicking is wired to `claude://resume?session=<uuid>`, an internal deep link
-   in the Claude desktop app, which imports the CLI session as a desktop session
-   named `local_<uuid>` and navigates to it.
+   in the Claude desktop app - and the uuid it takes is a DESKTOP ROW's own id,
+   not a CLI session id. The app mints a `local_<uuid>` row per conversation and
+   keeps the CLI id in a separate `cliSessionId` field.
 
-   CAVEAT, measured the hard way: if that CLI session ALREADY has a desktop
-   session under a different id, the import creates a SECOND desktop entry
-   pointing at the same conversation - a visible duplicate in the session list.
-   Repeat clicks after that are idempotent (the `local_<uuid>` name is
-   deterministic, so no third entry appears), but the first click on an
-   already-imported session does duplicate it.
+   The two are equal for only a minority of rows, so the click resolves the CLI
+   id the banner carries to the row that actually holds it. Measured on a real
+   44-conversation store: 6 rows had them equal, and those 6 were exactly the
+   ones whose banners had ever navigated - the other 38 failed identically every
+   time, which read as flakiness rather than the deterministic bug it was.
+
+   Passing an UNRESOLVED CLI id is what created the duplicate rows: it asks the
+   app to import a conversation it may already be showing, the import lands
+   first, the app writes its own row after, and one conversation ends up with
+   two. So a click that cannot resolve a row raises the app instead of guessing.
 
 3. macOS draws the banner's icon, and its Notification Center grouping, from
    the SENDING app - so every tool sharing one terminal-notifier looks alike and
@@ -942,13 +947,12 @@ def self_test():
 
 
 def doctor():
-    """Report duplicate session entries and how to converge each pair.
+    """Report where clicks will land, and any leftover duplicate rows.
 
-    Clicking a notification imports the CLI session as `local_<uuid>`. If the
-    desktop app already tracked that conversation under a different id, you end
-    up with two rows for one conversation. Archiving the extra one is futile -
-    the next click un-archives it - so the durable fix is to converge on the
-    `local_<uuid>` entry, which every future click resolves to.
+    The duplicates are historical: they date from when the click passed an
+    unresolved CLI id and the app imported a conversation it already had. They
+    no longer affect click-to-jump, which resolves to whichever row is live and
+    most recently active, so this is now a tidiness report rather than a fix-me.
     """
     if not IS_MAC:
         print("Duplicate session entries are a macOS desktop-app concern only.")
@@ -980,23 +984,22 @@ def doctor():
         print("No duplicate session entries found.")
         return 0
 
-    print(f"{len(pairs)} conversation(s) tracked under more than one session entry.\n")
-    print("Clicking a notification imports a session as local_<uuid>. When the app already")
-    print("tracked that conversation under another id, you get a second row for it.")
-    print("Archive the row you do not want; clicking no longer resurrects it, because")
-    print("a click that would add a row raises the app instead of navigating.\n")
-    print("Notifications for an un-converged session therefore carry NO click target,")
-    print("so no new rows appear. Converge one and its click-to-jump returns.\n")
+    print(f"{len(pairs)} conversation(s) listed under more than one session entry.\n")
+    print("These are leftovers from when clicking passed an unresolved CLI id, which")
+    print("asked the app to import a conversation it was already showing. Clicks no")
+    print("longer do that: they resolve to a row that exists, or raise the app.\n")
+    print("Nothing here breaks click-to-jump - the click lands on whichever of these")
+    print("rows was active most recently. Tidy them if the duplicates bother you.\n")
     for cli, canonical, others in pairs:
+        landing = desktop_target(cli)
         print(f"conversation {cli}")
-        print(f"  canonical (click always lands here) : {canonical or '(not created yet)'}")
-        for o in others:
-            print(f"  also listed as                      : {o}")
-        if canonical:
-            print("  fix: give the canonical entry the name you want, then archive the other(s).")
-            print("       History is shared - both point at the same transcript - so nothing is lost.")
-        else:
-            print("  no canonical entry yet; it will appear the first time you click.")
+        print(f"  click lands on : local_{landing}" if landing else
+              "  click lands on : nothing resolvable - raises the app")
+        for o in ([canonical] if canonical else []) + list(others):
+            if o and o != (f"local_{landing}" if landing else None):
+                print(f"  also listed as : {o}")
+        print("  tidy: name the row you want to keep, then archive the other(s).")
+        print("        History is shared - all point at the same transcript.")
         print()
     print("Prefer no click-to-jump at all?  export CC_NOTIFY_NO_DEEPLINK=1")
     return 0
