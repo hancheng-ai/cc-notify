@@ -535,6 +535,83 @@ class DuplicateSessionEntries(unittest.TestCase):
         self.assertTrue(N.would_duplicate(UUID))
 
 
+class ResolvesToTheDesktopRow(unittest.TestCase):
+    """The deep link addresses a desktop ROW, not a CLI session.
+
+    Measured on a live store: `claude://resume?session=<X>` for a row whose
+    sessionId is `local_<X>` lands on that row and creates nothing, even though
+    its cliSessionId is a different uuid. The app mints its own `local_<uuid>`
+    per conversation and keeps the CLI id in a separate field; passing the CLI id
+    for such a row asks the app to import a conversation it is already showing,
+    which is what minted the untitled duplicates.
+    """
+
+    OTHER = "deadbeef-0000-4000-8000-000000000000"
+
+    def setUp(self):
+        self._real = N.desktop_records
+        self.addCleanup(setattr, N, "desktop_records", self._real)
+        self._plat = (N.IS_MAC, N.IS_WIN, N.IS_LINUX)
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        self.addCleanup(lambda: setattr_all(N, self._plat))
+
+    def _records(self, rows):
+        """rows: (sessionId, cliSessionId, archived, lastActivityAt)"""
+        N.desktop_records = lambda: [
+            (r[0], r[1], {"isArchived": r[2], "lastActivityAt": r[3]}) for r in rows]
+
+    def test_the_desktop_uuid_is_returned_not_the_cli_id(self):
+        # The case that covers 86% of a real store and never navigated before.
+        self._records([("local_%s" % self.OTHER, UUID, False, 10)])
+        self.assertEqual(N.desktop_target(UUID), self.OTHER)
+
+    def test_a_canonical_row_resolves_to_itself(self):
+        # The minority shape that used to work by coincidence: the two ids are
+        # equal, so addressing the row and addressing the session look the same.
+        self._records([("local_%s" % UUID, UUID, False, 10)])
+        self.assertEqual(N.desktop_target(UUID), UUID)
+
+    def test_an_untracked_session_resolves_to_nothing(self):
+        """The duplicate-minting path, closed.
+
+        Previously this navigated, on the reasoning that an import would create
+        the conversation's first row. It does -- and then the app writes its own
+        row too, and the conversation has two. A click that cannot resolve a
+        target must raise the app, not guess."""
+        self._records([])
+        self.assertIsNone(N.desktop_target(UUID))
+
+    def test_an_archived_row_is_not_resurrected(self):
+        self._records([("local_%s" % self.OTHER, UUID, True, 10)])
+        self.assertIsNone(N.desktop_target(UUID))
+
+    def test_the_most_recently_active_row_wins(self):
+        # A conversation that already has duplicates still has one row the owner
+        # is actually working in. Send them there rather than declining.
+        self._records([("local_aaaaaaaa-0000-4000-8000-000000000000", UUID, False, 1),
+                       ("local_bbbbbbbb-0000-4000-8000-000000000000", UUID, False, 99)])
+        self.assertEqual(N.desktop_target(UUID), "bbbbbbbb-0000-4000-8000-000000000000")
+
+    def test_other_conversations_are_not_consulted(self):
+        self._records([("local_%s" % self.OTHER, "9999abcd-0000-4000-8000-000000000000",
+                        False, 10)])
+        self.assertIsNone(N.desktop_target(UUID))
+
+    def test_the_click_opens_the_resolved_row(self):
+        """End to end: the banner carries the CLI id, the click opens the row."""
+        self._records([("local_%s" % self.OTHER, UUID, False, 10)])
+        seen = []
+        real = N.subprocess.run
+        N.subprocess.run = lambda argv, **kw: seen.append(argv)
+        try:
+            N.open_url(LINK, N.DESKTOP_BUNDLE)
+        finally:
+            N.subprocess.run = real
+        self.assertEqual(seen[0],
+                         ["/usr/bin/open", "claude://resume?session=%s" % self.OTHER])
+        self.assertNotIn(UUID, seen[0][1])
+
+
 class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     """The click target is dropped for any session where clicking would mint a
     second, untitled row. Litter is worse than a missing click - the banner
@@ -543,6 +620,10 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def setUp(self):
         self._real = N.would_duplicate
         self.addCleanup(setattr, N, "would_duplicate", self._real)
+        self._target = N.desktop_target
+        self.addCleanup(setattr, N, "desktop_target", self._target)
+        # Default: the row resolves to itself, i.e. the canonical shape.
+        N.desktop_target = lambda sid: sid
         self._plat = (N.IS_MAC, N.IS_WIN, N.IS_LINUX)
         N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
         self.addCleanup(lambda: setattr_all(N, self._plat))
@@ -557,10 +638,13 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
         N.would_duplicate = lambda sid: True
         self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
 
-    def test_click_focuses_the_app_when_navigating_would_add_a_row(self):
+    def test_click_focuses_the_app_when_nothing_resolves(self):
         """Bare claude:// raises the app without importing a session. Measured:
-        open -b / open -a / AppleScript activate all no-op on this app."""
-        N.would_duplicate = lambda sid: True
+        open -b / open -a / AppleScript activate all no-op on this app.
+
+        Reached when the desktop row is not tracked yet -- navigating blind is
+        exactly what mints the untitled second row."""
+        N.desktop_target = lambda sid: None
         self.assertEqual(self.click(LINK), ["/usr/bin/open", "claude://"])
 
     def test_click_command_pins_a_stable_interpreter(self):
@@ -576,11 +660,10 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def test_click_navigates_once_the_session_is_converged(self):
         """Self-healing: converge a session and its click-to-jump returns -
         including for banners posted back when it was not converged."""
-        N.would_duplicate = lambda sid: False
         self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
 
     def test_always_deeplink_overrides_the_guard(self):
-        N.would_duplicate = lambda sid: True
+        N.desktop_target = lambda sid: None
         os.environ["CC_NOTIFY_ALWAYS_DEEPLINK"] = "1"
         self.addCleanup(os.environ.pop, "CC_NOTIFY_ALWAYS_DEEPLINK", None)
         self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
@@ -603,22 +686,19 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def test_terminal_session_gets_its_terminal_back_not_the_deep_link(self):
         """claude://resume cannot reach into iTerm - it would import a COPY of a
         live session into the desktop app. Raise the real host instead."""
-        N.would_duplicate = lambda sid: False   # says safe; it is not, see below
+        N.desktop_target = lambda sid: sid      # resolvable; still wrong surface
         self.assertEqual(self.click(LINK, "com.googlecode.iterm2"),
                          ["/usr/bin/open", "-b", "com.googlecode.iterm2"])
 
     def test_surface_check_precedes_the_duplicate_check(self):
-        """would_duplicate is False for terminal sessions - true in its own terms
-        (no second row) but blind to the surface being wrong."""
-        N.would_duplicate = lambda sid: False
+        """desktop_target resolves for terminal sessions - correct in its own
+        terms, but blind to the surface being wrong."""
         self.assertNotIn(LINK, self.click(LINK, "com.apple.Terminal"))
 
     def test_desktop_session_still_navigates(self):
-        N.would_duplicate = lambda sid: False
         self.assertEqual(self.click(LINK, N.DESKTOP_BUNDLE), ["/usr/bin/open", LINK])
 
     def test_unknown_surface_falls_back_to_the_duplicate_check(self):
-        N.would_duplicate = lambda sid: False
         self.assertEqual(self.click(LINK, None), ["/usr/bin/open", LINK])
 
     def test_hostile_surface_is_never_executed(self):

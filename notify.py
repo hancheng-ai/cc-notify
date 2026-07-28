@@ -398,6 +398,45 @@ def desktop_records():
     return out
 
 
+def desktop_target(session_id):
+    """The uuid to put in a resume link for this CLI session, or None.
+
+    The deep link addresses a DESKTOP ROW, not a CLI session. Measured: opening
+    `claude://resume?session=<X>` for a row whose sessionId is `local_<X>` lands
+    on that row and creates nothing, even though its cliSessionId is a different
+    uuid entirely.
+
+    That is the whole bug. The desktop app mints its own `local_<uuid>` per
+    conversation and keeps the CLI id in a separate `cliSessionId` field; the two
+    are equal for only a minority of rows, and those were exactly the rows whose
+    banners ever navigated. Passing the CLI id for any other row asks the app to
+    import a conversation it is already showing -- which is what minted the
+    untitled duplicates, recognisable by `lastActivityAt == createdAt`.
+
+    Returns None when nothing is tracked yet, and that refusal is deliberate.
+    Navigating blind is precisely how the second row appears: the import lands
+    first, the app writes its own row afterwards, and one conversation ends up
+    with two. A click that cannot resolve a target should raise the app and let
+    the owner pick, not guess.
+    """
+    if not IS_MAC or not session_id:
+        return None
+    live = []
+    for sid, cli, d in desktop_records():
+        if cli != session_id or not sid.startswith("local_"):
+            continue
+        if d.get("isArchived"):
+            # Following the link would un-archive it, putting a row back in a
+            # list its owner deliberately cleared. Declining matches what this
+            # module already chose to do about archived rows.
+            continue
+        live.append((d.get("lastActivityAt") or 0, sid))
+    if not live:
+        return None
+    live.sort()
+    return live[-1][1][len("local_"):]
+
+
 def would_duplicate(session_id):
     """True if clicking a link for this session would add a row to the list.
 
@@ -542,8 +581,17 @@ def open_url(url, surface=None):
             pass
         return 0
 
-    safe = not would_duplicate(sid) or os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK")
-    argv = ["/usr/bin/open", url if safe else "claude://"]
+    # Resolve the CLI id the banner carries to the desktop row it actually
+    # refers to. None means "nothing resolvable" -- raise the app and let the
+    # owner pick, rather than importing a copy of a conversation already on
+    # screen. CC_NOTIFY_ALWAYS_DEEPLINK keeps its old meaning: send the link
+    # exactly as posted, guard bypassed, for diagnosing this very code.
+    if os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK"):
+        argv = ["/usr/bin/open", url]
+    else:
+        target = desktop_target(sid)
+        argv = ["/usr/bin/open",
+                "claude://resume?session=%s" % target if target else "claude://"]
     try:
         subprocess.run(argv, timeout=10,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
