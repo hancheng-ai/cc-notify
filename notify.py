@@ -442,33 +442,16 @@ def desktop_target(session_id):
             # list its owner deliberately cleared. Declining matches what this
             # module already chose to do about archived rows.
             continue
-        live.append((d.get("lastActivityAt") or 0, sid))
+        # Coerced, not trusted. These records are written by another program, and
+        # one row with a string timestamp beside one with an int makes sort()
+        # raise - which would take the whole click down, not just the ordering.
+        # foreground_session() already guards the sibling field the same way.
+        ts = d.get("lastActivityAt")
+        live.append((ts if isinstance(ts, (int, float)) else 0, sid))
     if not live:
         return None
-    live.sort()
+    live.sort(key=lambda r: r[0])
     return live[-1][1][len("local_"):]
-
-
-def would_duplicate(session_id):
-    """True if clicking a link for this session would add a row to the list.
-
-    The deep link imports a CLI session as `local_<uuid>`. Four cases:
-
-      canonical present, live      no - the click just navigates
-      canonical present, archived  YES - the click un-archives it, so a row returns
-      canonical absent, others     YES - the import mints a second entry
-      nothing tracked at all       no - the import creates the first entry
-    """
-    if not IS_MAC or not session_id:
-        return False
-    canonical = f"local_{session_id}"
-    same = [(sid, d) for sid, cli, d in desktop_records() if cli == session_id]
-    if not same:
-        return False  # a fresh CLI session: this becomes its only entry
-    for sid, d in same:
-        if sid == canonical:
-            return bool(d.get("isArchived"))
-    return True
 
 
 def duplicate_pairs():
@@ -491,7 +474,7 @@ def duplicate_pairs():
         if canonical not in ids:
             # Only a natively-tracked entry exists. That is one row, not a
             # duplicate - clicking would create the second, which is what
-            # would_duplicate() answers.
+            # desktop_target() answers.
             continue
         others = [sid for sid, d in entries
                   if sid != canonical and not d.get("isArchived")]
@@ -583,8 +566,8 @@ def open_url(url, surface=None):
     # the deep link. `claude://resume` cannot reach back into iTerm; it would
     # import a COPY of a live session into the desktop app and land you on that
     # - a new row for a conversation that is running elsewhere. Note this check
-    # comes FIRST: would_duplicate() says False for these, correctly in its own
-    # terms (no second row appears) but blind to the surface being wrong.
+    # comes FIRST: desktop_target() resolves happily for these, correctly in its
+    # own terms, but is blind to the host being wrong.
     if surface and BUNDLE_RE.match(surface) and surface != DESKTOP_BUNDLE:
         try:
             subprocess.run(["/usr/bin/open", "-b", surface], timeout=10,
@@ -598,12 +581,21 @@ def open_url(url, surface=None):
     # owner pick, rather than importing a copy of a conversation already on
     # screen. CC_NOTIFY_ALWAYS_DEEPLINK keeps its old meaning: send the link
     # exactly as posted, guard bypassed, for diagnosing this very code.
-    if os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK"):
-        argv = ["/usr/bin/open", url]
-    else:
-        target = desktop_target(sid)
-        argv = ["/usr/bin/open",
-                "claude://resume?session=%s" % target if target else "claude://"]
+    # Resolution reads files another program writes, so it is inside the guard
+    # too. A click that raises is worse than every failure this module tolerates
+    # elsewhere: the banner is already dismissed, so nothing happens at all and
+    # there is nothing left to click again. Falling back to the bare scheme at
+    # least surfaces the app.
+    argv = ["/usr/bin/open", "claude://"]
+    try:
+        if os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK"):
+            argv = ["/usr/bin/open", url]
+        else:
+            target = desktop_target(sid)
+            if target:
+                argv = ["/usr/bin/open", "claude://resume?session=%s" % target]
+    except Exception:
+        pass  # keep the fallback argv and still open something
     try:
         subprocess.run(argv, timeout=10,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1005,7 +997,12 @@ def doctor():
         for o in ([canonical] if canonical else []) + list(others):
             if o and o != (f"local_{landing}" if landing else None):
                 print(f"  also listed as : {o}")
-        print("  tidy: name the row you want to keep, then archive the other(s).")
+        if landing:
+            print(f"  tidy: keep local_{landing} - the one clicks land on - and archive")
+            print("        the rest. Archiving the landing row instead sends clicks to")
+            print("        whatever is left, or to nothing.")
+        else:
+            print("  tidy: keep whichever row you want, archive the rest.")
         print("        History is shared - all point at the same transcript.")
         print()
     print("Prefer no click-to-jump at all?  export CC_NOTIFY_NO_DEEPLINK=1")

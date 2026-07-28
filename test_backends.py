@@ -496,9 +496,10 @@ class PluginPackaging(unittest.TestCase):
 
 
 class DuplicateSessionEntries(unittest.TestCase):
-    """Clicking imports a session as local_<uuid>. If the app already tracked
-    that conversation under another id, a second row appears. One-time per
-    session, and archiving it does not stick - the next click un-archives it."""
+    """Leftover rows from when the click passed an unresolved CLI id.
+
+    They no longer affect click-to-jump - desktop_target decides that - so this
+    only has to find them for --doctor to report as tidiness."""
 
     def setUp(self):
         self._real = N.desktop_records
@@ -508,19 +509,6 @@ class DuplicateSessionEntries(unittest.TestCase):
         """pairs: (sessionId, cliSessionId) or (sessionId, cliSessionId, archived)"""
         N.desktop_records = lambda: [
             (p[0], p[1], {"isArchived": p[2] if len(p) > 2 else False}) for p in pairs]
-
-    def test_no_duplicate_when_the_canonical_entry_is_the_only_one(self):
-        self._records([(f"local_{UUID}", UUID)])
-        self.assertFalse(N.would_duplicate(UUID))
-
-    def test_duplicate_when_tracked_under_a_native_id(self):
-        self._records([("local_deadbeef-0000-4000-8000-000000000000", UUID)])
-        self.assertTrue(N.would_duplicate(UUID))
-
-    def test_no_duplicate_for_a_session_the_app_does_not_track(self):
-        """A fresh CLI session: the import creates its first entry, not a second."""
-        self._records([])
-        self.assertFalse(N.would_duplicate(UUID))
 
     def test_pairs_identify_canonical_and_extras(self):
         native = "local_deadbeef-0000-4000-8000-000000000000"
@@ -534,29 +522,69 @@ class DuplicateSessionEntries(unittest.TestCase):
         self._records([(f"local_{UUID}", UUID)])
         self.assertEqual(N.duplicate_pairs(), [])
 
-    def test_converged_pair_is_no_longer_reported(self):
-        """Archiving the native entry resolves the pair for good - nothing
-        resurrects it, unlike the canonical one."""
+    def test_archiving_the_extra_row_resolves_the_pair(self):
+        """Nothing resurrects it: a click never un-archives a row now."""
         native = "local_deadbeef-0000-4000-8000-000000000000"
         self._records([(f"local_{UUID}", UUID, False), (native, UUID, True)])
         self.assertEqual(N.duplicate_pairs(), [])
-        self.assertFalse(N.would_duplicate(UUID))
 
-    def test_archived_canonical_still_counts_as_outstanding(self):
-        """Archiving the CANONICAL one does not stick: the next click
-        un-archives it and the second row comes back."""
+    def test_a_live_row_beside_an_archived_one_is_still_a_pair(self):
+        """Two rows are still two rows; --doctor should surface it."""
         native = "local_deadbeef-0000-4000-8000-000000000000"
         self._records([(f"local_{UUID}", UUID, True), (native, UUID, False)])
         self.assertEqual(len(N.duplicate_pairs()), 1)
-        self.assertTrue(N.would_duplicate(UUID))
 
     def test_a_lone_native_entry_is_not_a_duplicate(self):
-        """One row is not a pair. Clicking would create the second - that is
-        what would_duplicate() answers, and it must not be reported as an
-        existing duplicate."""
+        """One row is not a pair, whatever its id looks like."""
         self._records([("local_deadbeef-0000-4000-8000-000000000000", UUID)])
         self.assertEqual(N.duplicate_pairs(), [])
-        self.assertTrue(N.would_duplicate(UUID))
+
+
+class ResolutionSurvivesBadRecords(unittest.TestCase):
+    """The store is written by another program; a click must never raise.
+
+    The banner is already dismissed by the time the handler runs, so an
+    exception means nothing happens and there is nothing left to click again -
+    strictly worse than any other failure this module tolerates."""
+
+    def setUp(self):
+        self._real = N.desktop_records
+        self.addCleanup(setattr, N, "desktop_records", self._real)
+        self._mac = N.IS_MAC
+        self.addCleanup(setattr, N, "IS_MAC", self._mac)
+        N.IS_MAC = True
+
+    def test_mixed_timestamp_types_do_not_raise(self):
+        """int beside str made sort() raise, taking the whole click down."""
+        N.desktop_records = lambda: [
+            (f"local_{UUID}", UUID, {"lastActivityAt": 1}),
+            ("local_bbbbbbbb-0000-4000-8000-000000000000", UUID,
+             {"lastActivityAt": "2026-07-29T00:00:00Z"}),
+        ]
+        self.assertIsNotNone(N.desktop_target(UUID))
+
+    def test_missing_and_null_timestamps_do_not_raise(self):
+        N.desktop_records = lambda: [
+            (f"local_{UUID}", UUID, {}),
+            ("local_bbbbbbbb-0000-4000-8000-000000000000", UUID,
+             {"lastActivityAt": None}),
+        ]
+        self.assertIsNotNone(N.desktop_target(UUID))
+
+    def test_a_raising_resolver_still_opens_the_app(self):
+        """Resolution blowing up must degrade to the bare scheme, not silence."""
+        real = N.desktop_target
+        self.addCleanup(setattr, N, "desktop_target", real)
+        def boom(sid): raise TypeError("unorderable")
+        N.desktop_target = boom
+        seen = []
+        realrun = N.subprocess.run
+        N.subprocess.run = lambda argv, **kw: seen.append(argv)
+        try:
+            self.assertEqual(N.open_url(LINK), 0)
+        finally:
+            N.subprocess.run = realrun
+        self.assertEqual(seen, [["/usr/bin/open", "claude://"]])
 
 
 class ResolvesToTheDesktopRow(unittest.TestCase):
@@ -642,8 +670,6 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     still says which session wants you."""
 
     def setUp(self):
-        self._real = N.would_duplicate
-        self.addCleanup(setattr, N, "would_duplicate", self._real)
         self._target = N.desktop_target
         self.addCleanup(setattr, N, "desktop_target", self._target)
         # Default: the row resolves to itself, i.e. the canonical shape.
@@ -654,12 +680,11 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
         for v in ("CC_NOTIFY_NO_DEEPLINK", "CC_NOTIFY_ALWAYS_DEEPLINK"):
             os.environ.pop(v, None)
 
-    def test_link_is_attached_regardless_of_current_state(self):
-        """The banner always carries a click target now.
+    def test_link_is_always_attached(self):
+        """The banner always carries a click target.
 
-        Whether following it is safe is decided when it is clicked, because a
-        banner outlives the state it was posted under."""
-        N.would_duplicate = lambda sid: True
+        Which row it reaches is decided when it is clicked, because a banner
+        outlives the state it was posted under."""
         self.assertEqual(N.build({"session_id": UUID, "cwd": "/w/r"})[3], LINK)
 
     def test_click_focuses_the_app_when_nothing_resolves(self):
@@ -681,9 +706,8 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def test_click_command_quotes_its_arguments(self):
         self.assertIn("'%s'" % LINK, N.click_command(LINK))
 
-    def test_click_navigates_once_the_session_is_converged(self):
-        """Self-healing: converge a session and its click-to-jump returns -
-        including for banners posted back when it was not converged."""
+    def test_click_navigates_to_the_resolved_row(self):
+        """A resolvable row is opened directly - no convergence required."""
         self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
 
     def test_always_deeplink_overrides_the_guard(self):
@@ -693,7 +717,6 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
         self.assertEqual(self.click(LINK), ["/usr/bin/open", LINK])
 
     def test_no_deeplink_still_removes_the_target_entirely(self):
-        N.would_duplicate = lambda sid: False
         os.environ["CC_NOTIFY_NO_DEEPLINK"] = "1"
         self.addCleanup(os.environ.pop, "CC_NOTIFY_NO_DEEPLINK", None)
         self.assertIsNone(N.build({"session_id": UUID, "cwd": "/w/r"})[3])
@@ -701,7 +724,6 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def test_click_refuses_anything_but_our_own_scheme(self):
         """The handler is reachable from a delivered notification, so it must
         never be a general-purpose opener."""
-        N.would_duplicate = lambda sid: False
         for hostile in ("file:///etc/passwd", "https://evil.test",
                         "claude://resume?session=../../x", "",
                         "claude://resume?session=%s&x=1" % UUID):
@@ -728,7 +750,6 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
     def test_hostile_surface_is_never_executed(self):
         """The surface is interpolated into a shell command, so it is validated
         rather than trusted."""
-        N.would_duplicate = lambda sid: False
         for bad in ("com.x; rm -rf /", "$(whoami)", "a b", "`id`", "-"):
             self.assertEqual(self.click(LINK, bad), ["/usr/bin/open", LINK], bad)
 

@@ -414,16 +414,18 @@ welcome.
 
 ## Limitations
 
-- **`claude://resume` is internal and undocumented.** It works today and was
-  observed to duplicate a session entry on first click (see above), and Anthropic
-  may change it at any time. If clicking stops working,
-  that's the first thing to check — notifications themselves will keep working.
+- **`claude://resume` is internal and undocumented.** Anthropic may change it at
+  any time, including what its `session` parameter means — this plugin already
+  had that wrong once. If clicking stops working, that's the first thing to
+  check; notifications themselves will keep working regardless.
+- **A conversation the desktop app has never tracked cannot be jumped to.**
+  There is no row to resolve, and importing one is what created the duplicate
+  entries, so the click raises the app instead.
+- **Archived rows are left alone.** If a conversation's only row is archived,
+  the click declines rather than un-archiving it back into a list you cleared.
 - **terminal-notifier is at 2.0.0** and lightly maintained. On macOS,
   notifications appear under its identity and need notification permission
   granted once.
-- The first click on a terminal-CLI session **adopts** it into the desktop app
-  as a desktop session. That's the deep link's designed behaviour, not a side
-  effect of this hook.
 - Linux replacement uses the `x-canonical-private-synchronous` hint. GNOME, KDE
   and dunst honour it; a daemon that doesn't will simply stack notifications
   instead of replacing them.
