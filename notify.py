@@ -73,8 +73,15 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 # whatever environment Claude Code itself runs with - usually the full user PATH
 # - but that is not guaranteed to include Homebrew's directories, so checking
 # the known install paths first costs nothing and removes a failure mode.
-TN_PATHS = ("/usr/local/bin/terminal-notifier",     # Homebrew on Intel
-            "/opt/homebrew/bin/terminal-notifier")  # Homebrew on Apple Silicon
+#
+# The NATIVE Homebrew prefix has to come first. A machine that has been through
+# an Intel-to-Apple-silicon migration carries both, and a fixed Intel-first order
+# keeps selecting the x86_64 build even after the arm64 one is installed - so the
+# "Support Ending for Intel-based Apps" warning survives the fix for it, which is
+# exactly how this was found.
+_TN_BREW = ("/opt/homebrew/bin/terminal-notifier",   # Homebrew on Apple silicon
+            "/usr/local/bin/terminal-notifier")      # Homebrew on Intel
+TN_PATHS = _TN_BREW if (IS_MAC and os.uname().machine == "arm64") else _TN_BREW[::-1]
 NOTIFY_SEND_PATHS = ("/usr/bin/notify-send", "/usr/local/bin/notify-send")
 POWERSHELL_PATHS = (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",)
 MAC_PS = "/bin/ps"

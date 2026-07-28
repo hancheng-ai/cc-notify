@@ -151,6 +151,30 @@ class Build(unittest.TestCase):
                     N.IS_MAC, N.IS_WIN, N.IS_LINUX = old
 
 
+class NotifierSelection(unittest.TestCase):
+    """A migrated Mac has BOTH Homebrew prefixes; the native one must win."""
+
+    def test_apple_silicon_prefers_the_arm64_prefix(self):
+        if not N.IS_MAC or os.uname().machine != "arm64":
+            self.skipTest("arm64 macOS only")
+        self.assertEqual(N.TN_PATHS[0], "/opt/homebrew/bin/terminal-notifier")
+
+    def test_both_prefixes_are_still_searched(self):
+        self.assertEqual(sorted(N.TN_PATHS),
+                         ["/opt/homebrew/bin/terminal-notifier",
+                          "/usr/local/bin/terminal-notifier"])
+
+    def test_first_executable_takes_the_earlier_path(self):
+        """Order is the whole mechanism, so pin it."""
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            a, b = _os.path.join(d, "a"), _os.path.join(d, "b")
+            for f in (a, b):
+                open(f, "w").close(); _os.chmod(f, 0o755)
+            self.assertEqual(N._first_executable((a, b), "nope"), a)
+            self.assertEqual(N._first_executable((b, a), "nope"), b)
+
+
 class MacBackend(unittest.TestCase):
     def test_full_invocation(self):
         a = N.macos_argv("/tn", "Title", "repo · plan", "msg", LINK, UUID)

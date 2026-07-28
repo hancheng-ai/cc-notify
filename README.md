@@ -68,7 +68,9 @@ question is Homebrew's `terminal-notifier`, not ours. Re-badging copies it into
 a bundle carrying our id, so macOS reports it under our name. An Intel-only
 Homebrew (`/usr/local`) ships an `x86_64` build; it runs under Rosetta today and
 stops when Rosetta does. Installing `terminal-notifier` from an arm64 Homebrew
-(`/opt/homebrew`) resolves it. `--doctor` detects and explains this.
+(`/opt/homebrew`) resolves it — the native prefix is searched first, so the
+arm64 build is picked even when a leftover Intel one is still installed.
+`--doctor` detects and explains this.
 
 **⚠️ Honest status:** macOS is verified end to end on real hardware. The Linux
 and Windows backends are implemented and covered by tests that assert the exact
