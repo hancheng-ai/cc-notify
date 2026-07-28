@@ -49,6 +49,7 @@ are never suppressed, since a wrong guess there would leave a session hanging.
 | Turn finished / failed | ✅ | ✅ | ✅ |
 | One live banner per session | ✅ | ✅ | ✅ |
 | Click to jump to the session | ✅ | ➖ | ⚠️ |
+| Terminal sessions get the terminal back | ✅ | ➖ | ➖ |
 | Quiet when you're watching | ✅ | ➖ | ➖ |
 | Own icon + Notification Center group | ✅ | ➖ | ➖ |
 | Backend | `terminal-notifier`, falling back to `osascript` | `notify-send` | PowerShell toast |
@@ -59,6 +60,15 @@ Linux for a deep link to open, and `notify-send --action` blocks until the user
 responds — a hook that blocks is exactly what must never happen here. You still
 get correctly labelled, per-session notifications, which is the part that makes
 parallel sessions workable.
+
+### The "Support Ending for Intel-based Apps" warning
+
+If macOS warns that **cc-notify** contains an Intel component, the binary in
+question is Homebrew's `terminal-notifier`, not ours. Re-badging copies it into
+a bundle carrying our id, so macOS reports it under our name. An Intel-only
+Homebrew (`/usr/local`) ships an `x86_64` build; it runs under Rosetta today and
+stops when Rosetta does. Installing `terminal-notifier` from an arm64 Homebrew
+(`/opt/homebrew`) resolves it. `--doctor` detects and explains this.
 
 **⚠️ Honest status:** macOS is verified end to end on real hardware. The Linux
 and Windows backends are implemented and covered by tests that assert the exact
@@ -263,6 +273,19 @@ doesn't match.
 >
 > `python3 notify.py --doctor` lists what is still un-converged.
 > `CC_NOTIFY_ALWAYS_DEEPLINK=1` always navigates, rows and all.
+>
+> **Sessions running in a terminal never follow the link at all.** `claude://`
+> only ever opens the desktop app, so for a session hosted in iTerm or
+> Terminal the link would not bring you back to it — it would import a *copy*
+> into the desktop app and land you there, leaving the real session running
+> where you left it. Those clicks raise the hosting terminal instead. The
+> duplicate check alone does not catch this: it correctly reports that no
+> second row appears, being blind to the surface being wrong.
+>
+> The host is detected from process ancestry and baked into the banner at post
+> time — and unlike the duplicate check, that is right, because a session
+> cannot move from iTerm to the desktop app. macOS offers no way to address the
+> specific tab, so you get the app, not the pane.
 >
 > This was originally documented here as "verified idempotent". That was wrong,
 > and wrong in an instructive way: the test only ever fired at a session whose

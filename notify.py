@@ -157,35 +157,67 @@ def _icon_bearing_bundle(exe):
     return src if os.path.isfile(src) else None
 
 
-def trigger_app_icns():
-    """.icns of whichever app triggered this hook, found by walking ancestors.
-
-    Started from the Claude desktop app you get Claude's icon; started from a
-    terminal you get Terminal's or iTerm's. macOS only.
-    """
+def _ancestor_exes():
+    """Executable paths from this process upward, nearest first. macOS only."""
     if not IS_MAC:
-        return None
+        return
     pid = os.getppid()  # start at the parent: this process is just the interpreter
     for _ in range(10):  # bounded, so a strange process tree can never spin
         try:
             out = subprocess.run([MAC_PS, "-o", "ppid=,comm=", "-p", str(pid)],
                                  capture_output=True, text=True, timeout=2).stdout.strip()
         except Exception:
-            return None
+            return
         # comm can contain spaces ("Application Support"), so split once only.
         parts = out.split(None, 1)
         if len(parts) < 2:
-            return None
+            return
         ppid, exe = parts[0], parts[1].strip()
-        icns = _icon_bearing_bundle(exe)
-        if icns:
-            return icns
+        yield exe
         if ppid in ("0", "1", str(pid)):
-            return None
+            return
         try:
             pid = int(ppid)
         except ValueError:
-            return None
+            return
+
+
+def trigger_app_icns():
+    """.icns of whichever app triggered this hook, found by walking ancestors.
+
+    Started from the Claude desktop app you get Claude's icon; started from a
+    terminal you get Terminal's or iTerm's. macOS only.
+    """
+    for exe in _ancestor_exes():
+        icns = _icon_bearing_bundle(exe)
+        if icns:
+            return icns
+    return None
+
+
+def launching_surface():
+    """Bundle id of the app this session is running inside, or None.
+
+    The point is to tell a desktop-app session from a terminal one, because the
+    deep link only ever opens the desktop app. Clicking a banner for a session
+    living in iTerm would not return you to it - it would import a COPY into the
+    desktop app and take you there instead.
+
+    Walks past `com.anthropic.claude-code`: the CLI ships its own app wrapper, so
+    it is the first bundle on the ancestry chain, and it names the program rather
+    than the surface hosting it. The next bundle up is the real host.
+    """
+    for exe in _ancestor_exes():
+        i = exe.find(".app/")
+        if i < 0 or "/Contents/Developer/" in exe:
+            continue
+        try:
+            with open(os.path.join(exe[:i + 4], "Contents", "Info.plist"), "rb") as f:
+                bid = (plistlib.load(f) or {}).get("CFBundleIdentifier")
+        except Exception:
+            continue
+        if bid and bid != CLI_BUNDLE:
+            return bid
     return None
 
 
@@ -286,6 +318,14 @@ def rebadged_notifier(tn_binary):
 # --------------------------------------------------------------------------
 
 DESKTOP_BUNDLE = "com.anthropic.claudefordesktop"
+
+# The CLI's own app wrapper. It sits on the ancestry chain below whichever app
+# is really hosting the session, so surface detection has to step over it.
+CLI_BUNDLE = "com.anthropic.claude-code"
+
+# Conservative bundle-id shape. The value is interpolated into the shell command
+# a banner carries, so it is validated rather than trusted.
+BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{0,127}$")
 LSAPPINFO = "/usr/bin/lsappinfo"
 SESSION_STORE = os.path.expanduser(
     "~/Library/Application Support/Claude/claude-code-sessions")
@@ -455,13 +495,20 @@ def click_command(url):
     to clicks. The system shim outlives toolchains.
     """
     py = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
-    return "{} {} --open {}".format(
+    cmd = "{} {} --open {}".format(
         shlex.quote(py),
         shlex.quote(os.path.abspath(__file__)),
         shlex.quote(url))
+    # The hosting surface IS baked in at post time, and unlike the duplicate
+    # check that is correct: a session cannot migrate from iTerm to the desktop
+    # app, so this answer cannot go stale the way a state check does.
+    surface = launching_surface()
+    if surface and BUNDLE_RE.match(surface):
+        cmd += " --from " + shlex.quote(surface)
+    return cmd
 
 
-def open_url(url):
+def open_url(url, surface=None):
     """Click handler: navigate if that is safe right now, else just focus Claude.
 
     Deliberately degrades rather than doing nothing. A click that cannot safely
@@ -470,7 +517,9 @@ def open_url(url):
 
     The bare `claude://` is what raises the app, measured. `open -b <bundle>`,
     `open -a`, and AppleScript `activate` all return success and leave the app
-    exactly where it was, which is why none of them is used here.
+    exactly where it was, which is why none of them is used here. Terminals are
+    the opposite: `open -b` raises them fine, so a terminal-hosted session gets
+    its own app back rather than the deep link.
     """
     m = re.match(r"^claude://resume\?session=([0-9a-fA-F-]{36})$", url or "")
     if not m:
@@ -478,6 +527,21 @@ def open_url(url):
     sid = m.group(1)
     if not UUID_RE.match(sid):
         return 0
+
+    # A session hosted somewhere other than the desktop app must never follow
+    # the deep link. `claude://resume` cannot reach back into iTerm; it would
+    # import a COPY of a live session into the desktop app and land you on that
+    # - a new row for a conversation that is running elsewhere. Note this check
+    # comes FIRST: would_duplicate() says False for these, correctly in its own
+    # terms (no second row appears) but blind to the surface being wrong.
+    if surface and BUNDLE_RE.match(surface) and surface != DESKTOP_BUNDLE:
+        try:
+            subprocess.run(["/usr/bin/open", "-b", surface], timeout=10,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        return 0
+
     safe = not would_duplicate(sid) or os.environ.get("CC_NOTIFY_ALWAYS_DEEPLINK")
     argv = ["/usr/bin/open", url if safe else "claude://"]
     try:
@@ -852,6 +916,15 @@ def doctor():
         print("  and if that one arrives while the default does not, keep the variable set.")
     else:
         print("  posting as the shared terminal-notifier (re-badge off or unavailable)")
+    stale = intel_only_notifier(ours or tn)
+    if stale:
+        print()
+        print(f"  ⚠ that binary is {stale}-only, on an Apple silicon Mac.")
+        print("    macOS shows this as \"Support Ending for Intel-based Apps\" naming")
+        print("    cc-notify, because the re-badge puts our name on terminal-notifier's")
+        print("    binary. The binary is Homebrew's; we only copy and re-sign it.")
+        print("    It still works under Rosetta, and will stop when Rosetta goes.")
+        print("    Fix: install terminal-notifier from an arm64 Homebrew (/opt/homebrew).")
     print()
 
     pairs = duplicate_pairs()
@@ -862,7 +935,8 @@ def doctor():
     print(f"{len(pairs)} conversation(s) tracked under more than one session entry.\n")
     print("Clicking a notification imports a session as local_<uuid>. When the app already")
     print("tracked that conversation under another id, you get a second row for it.")
-    print("Archiving the extra row does NOT stick - the next click un-archives it.\n")
+    print("Archive the row you do not want; clicking no longer resurrects it, because")
+    print("a click that would add a row raises the app instead of navigating.\n")
     print("Notifications for an un-converged session therefore carry NO click target,")
     print("so no new rows appear. Converge one and its click-to-jump returns.\n")
     for cli, canonical, others in pairs:
@@ -878,6 +952,33 @@ def doctor():
         print()
     print("Prefer no click-to-jump at all?  export CC_NOTIFY_NO_DEEPLINK=1")
     return 0
+
+
+def intel_only_notifier(binary):
+    """Arch string if the notifier is Intel-only on Apple silicon, else None.
+
+    Worth naming explicitly because macOS reports it under OUR name: re-badging
+    copies terminal-notifier's binary into a bundle carrying our id, so the
+    "Support Ending for Intel-based Apps" warning says cc-notify. The binary is
+    Homebrew's and we never rebuild it - only an arm64 Homebrew fixes this.
+    """
+    if not IS_MAC or not binary or os.uname().machine != "arm64":
+        return None
+    # A Homebrew shim is a shell script; the Mach-O lives inside the .app.
+    real = os.path.realpath(binary)
+    cands = [real, os.path.join(os.path.dirname(os.path.dirname(real)),
+                                "terminal-notifier.app", "Contents", "MacOS",
+                                "terminal-notifier")]
+    for c in cands:
+        try:
+            out = subprocess.run(["/usr/bin/file", "-b", c], capture_output=True,
+                                 text=True, timeout=5).stdout
+        except Exception:
+            continue
+        if "Mach-O" not in out:
+            continue
+        return "x86_64" if "x86_64" in out and "arm64" not in out else None
+    return None
 
 
 def clear_banners():
@@ -909,7 +1010,11 @@ def main():
         return clear_banners()
     if "--open" in sys.argv:
         i = sys.argv.index("--open")
-        return open_url(sys.argv[i + 1] if i + 1 < len(sys.argv) else "")
+        surface = None
+        if "--from" in sys.argv:
+            j = sys.argv.index("--from")
+            surface = sys.argv[j + 1] if j + 1 < len(sys.argv) else None
+        return open_url(sys.argv[i + 1] if i + 1 < len(sys.argv) else "", surface)
     try:
         d = json.load(sys.stdin)
         if not isinstance(d, dict):

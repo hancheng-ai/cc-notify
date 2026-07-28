@@ -600,13 +600,57 @@ class DeepLinkSuppressedWhenItWouldLitter(unittest.TestCase):
                         "claude://resume?session=%s&x=1" % UUID):
             self.assertIsNone(self.click(hostile), hostile)
 
-    def click(self, url):
+    def test_terminal_session_gets_its_terminal_back_not_the_deep_link(self):
+        """claude://resume cannot reach into iTerm - it would import a COPY of a
+        live session into the desktop app. Raise the real host instead."""
+        N.would_duplicate = lambda sid: False   # says safe; it is not, see below
+        self.assertEqual(self.click(LINK, "com.googlecode.iterm2"),
+                         ["/usr/bin/open", "-b", "com.googlecode.iterm2"])
+
+    def test_surface_check_precedes_the_duplicate_check(self):
+        """would_duplicate is False for terminal sessions - true in its own terms
+        (no second row) but blind to the surface being wrong."""
+        N.would_duplicate = lambda sid: False
+        self.assertNotIn(LINK, self.click(LINK, "com.apple.Terminal"))
+
+    def test_desktop_session_still_navigates(self):
+        N.would_duplicate = lambda sid: False
+        self.assertEqual(self.click(LINK, N.DESKTOP_BUNDLE), ["/usr/bin/open", LINK])
+
+    def test_unknown_surface_falls_back_to_the_duplicate_check(self):
+        N.would_duplicate = lambda sid: False
+        self.assertEqual(self.click(LINK, None), ["/usr/bin/open", LINK])
+
+    def test_hostile_surface_is_never_executed(self):
+        """The surface is interpolated into a shell command, so it is validated
+        rather than trusted."""
+        N.would_duplicate = lambda sid: False
+        for bad in ("com.x; rm -rf /", "$(whoami)", "a b", "`id`", "-"):
+            self.assertEqual(self.click(LINK, bad), ["/usr/bin/open", LINK], bad)
+
+    def test_click_command_carries_the_surface(self):
+        real = N.launching_surface
+        N.launching_surface = lambda: "com.googlecode.iterm2"
+        try:
+            self.assertIn("--from com.googlecode.iterm2", N.click_command(LINK))
+        finally:
+            N.launching_surface = real
+
+    def test_click_command_omits_a_hostile_surface(self):
+        real = N.launching_surface
+        N.launching_surface = lambda: "com.x; rm -rf /"
+        try:
+            self.assertNotIn("--from", N.click_command(LINK))
+        finally:
+            N.launching_surface = real
+
+    def click(self, url, surface=None):
         """Run the click handler, returning the argv it would have run."""
         seen = []
         real = N.subprocess.run
         N.subprocess.run = lambda argv, **kw: seen.append(argv)
         try:
-            N.open_url(url)
+            N.open_url(url, surface)
         finally:
             N.subprocess.run = real
         return seen[0] if seen else None
