@@ -6,3 +6,9 @@ __pycache__/
 # persistence plus network self-update is a malware signature to any automated
 # safety screen, and plugin users only need the read-only `--doctor` half.
 dev/
+
+# Agent guidance for this repo, and the private GIT_DIR that mirrors it to the
+# NAS. Both stay off GitHub: CLAUDE.md documents the private half, and
+# .git-private is the second repo that tracks it. See CLAUDE.md section 1.
+CLAUDE.md
+.git-private/
