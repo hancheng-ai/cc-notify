@@ -160,6 +160,46 @@ rewritten. Clear them once:
 python3 ~/.claude/hooks/notify.py --clear-banners
 ```
 
+### Keep it working
+
+Everything this plugin depends on is undocumented and can change without
+notice, and every failure it has ever had was **silent** — clicking was 86%
+broken for weeks and read as flakiness. So the assumptions assert themselves
+against live data:
+
+```bash
+python3 ~/.claude/hooks/notify.py --doctor
+```
+
+```
+assumptions
+  [PASS] session store readable   48 session record(s) readable
+  [PASS] record field names       sessionId/cliSessionId on 48, numeric lastActivityAt on 48
+  [PASS] deep-link contract       41/44 conversations resolve to a row (93%)
+  [PASS] title recovery           recovered 'cc-notify R&D'
+  [PASS] bundle ids               resolved 2/2
+  [PASS] notifier binary          /opt/homebrew/bin/terminal-notifier
+```
+
+The resolution percentage is the canary: it sat at 14% throughout the deep-link
+bug. A collapse there means the contract moved.
+
+To run that daily and self-update, unattended:
+
+```bash
+python3 ~/.claude/hooks/notify.py --install-maintenance
+```
+
+That registers a launchd job which updates the plugin, rebuilds the re-badge if
+its architecture no longer matches, re-checks the assumptions — and notifies you
+**only** when something changed or something broke. A maintenance job that pings
+you daily gets muted, and a muted job is worse than none. Remove it with
+`--uninstall-maintenance`.
+
+launchd rather than a Claude Code hook deliberately: upkeep should happen in the
+weeks you don't open Claude, and a session-start hook would charge every session
+for work that matters once a day.
+
 ### Turn it down
 
 Three environment variables, no config file needed:

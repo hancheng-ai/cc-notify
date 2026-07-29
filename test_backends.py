@@ -151,6 +151,46 @@ class Build(unittest.TestCase):
                     N.IS_MAC, N.IS_WIN, N.IS_LINUX = old
 
 
+class Assumptions(unittest.TestCase):
+    """The drift detector itself has to be trustworthy when things are broken."""
+
+    def test_every_assumption_reports_a_verdict(self):
+        names = [n for n, _, _ in N.check_assumptions()]
+        for expected in ("session store readable", "record field names",
+                         "deep-link contract", "title recovery"):
+            self.assertIn(expected, names)
+
+    def test_a_raising_check_is_reported_as_failure_not_a_crash(self):
+        """A check that explodes must show up as FAIL, not take the run down."""
+        real = N.desktop_records
+        self.addCleanup(setattr, N, "desktop_records", real)
+        def boom(): raise RuntimeError("store unreadable")
+        N.desktop_records = boom
+        results = dict((n, ok) for n, ok, _ in N.check_assumptions())
+        self.assertFalse(results["record field names"])
+        self.assertFalse(results["deep-link contract"])
+
+    def test_empty_store_fails_rather_than_passing_vacuously(self):
+        """Zero conversations must not read as 'everything resolves'."""
+        real = N.desktop_records
+        self.addCleanup(setattr, N, "desktop_records", real)
+        N.desktop_records = lambda: []
+        results = dict((n, ok) for n, ok, _ in N.check_assumptions())
+        self.assertFalse(results["deep-link contract"])
+
+    def test_the_contract_check_catches_a_collapse(self):
+        """6/44 was the real broken state; it must not read as healthy."""
+        real_r, real_t = N.desktop_records, N.desktop_target
+        self.addCleanup(setattr, N, "desktop_records", real_r)
+        self.addCleanup(setattr, N, "desktop_target", real_t)
+        N.desktop_records = lambda: [
+            (f"local_{i:08d}-0000-4000-8000-000000000000",
+             f"{i:08d}-0000-4000-8000-000000000000", {}) for i in range(44)]
+        N.desktop_target = lambda cli: cli if cli.startswith("0000000") else None
+        ok = dict((n, o) for n, o, _ in N.check_assumptions())["deep-link contract"]
+        self.assertFalse(ok)
+
+
 class NotifierSelection(unittest.TestCase):
     """A migrated Mac has BOTH Homebrew prefixes; the native one must win."""
 

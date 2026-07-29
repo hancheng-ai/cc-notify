@@ -967,6 +967,15 @@ def doctor():
         print("    Fix: install terminal-notifier from an arm64 Homebrew (/opt/homebrew).")
     print()
 
+    print("assumptions")
+    bad = 0
+    for name, ok, detail in check_assumptions():
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name:<24} {detail}")
+        bad += not ok
+    print(f"\n  {bad} failing. These are undocumented interfaces; re-run after a"
+          if bad else "\n  All good. These are undocumented interfaces; re-run after a")
+    print("  Claude Code update, when drift would otherwise be silent.\n")
+
     pairs = duplicate_pairs()
     if not pairs:
         print("No duplicate session entries found.")
@@ -998,6 +1007,111 @@ def doctor():
     return 0
 
 
+def check_assumptions():
+    """Assert every undocumented thing this hook depends on, against live data.
+
+    Returns [(name, ok, detail)].
+
+    The point is that this plugin's failures have all been SILENT. Clicking was
+    86% broken for weeks and read as flakiness; the Intel warning survived its
+    own fix. The unit tests stayed green throughout, because they exercise
+    synthetic records - they would pass just as happily if every real assumption
+    below had rotted. So these run against the actual store, the actual
+    transcripts and the actual installed binaries, and are meant to be re-run
+    after Claude Code updates.
+    """
+    out = []
+
+    def check(name, fn):
+        try:
+            ok, detail = fn()
+        except Exception as e:
+            ok, detail = False, f"raised {type(e).__name__}: {e}"
+        out.append((name, ok, detail))
+
+    def store():
+        if not os.path.isdir(SESSION_STORE):
+            return False, f"missing: {SESSION_STORE}"
+        n = len(desktop_records())
+        return bool(n), f"{n} session record(s) readable"
+
+    def fields():
+        recs = desktop_records()
+        if not recs:
+            return False, "no records to inspect"
+        stamped = sum(1 for _, _, d in recs
+                      if isinstance(d.get("lastActivityAt"), (int, float)))
+        # sessionId/cliSessionId are guaranteed by desktop_records itself, which
+        # drops anything lacking them - so a zero count here means the names
+        # changed, which is exactly the drift worth catching.
+        return bool(stamped), (f"sessionId/cliSessionId on {len(recs)}, "
+                               f"numeric lastActivityAt on {stamped}")
+
+    def deep_link():
+        clis = {cli for _, cli, _ in desktop_records()}
+        if not clis:
+            return False, "no conversations tracked"
+        hit = sum(1 for c in clis if desktop_target(c))
+        pct = 100 * hit // len(clis)
+        # A handful legitimately do not resolve - archived-only conversations.
+        # A collapse to near zero is the signature of the contract moving.
+        return pct >= 50, f"{hit}/{len(clis)} conversations resolve to a row ({pct}%)"
+
+    def titles():
+        root = os.path.expanduser("~/.claude/projects")
+        newest, best = None, 0
+        for dp, _, ns in os.walk(root):
+            for n in ns:
+                if not n.endswith(".jsonl"):
+                    continue
+                p = os.path.join(dp, n)
+                try:
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    continue
+                if mt > best:
+                    newest, best = p, mt
+        if not newest:
+            return False, "no transcripts found"
+        t = session_title(newest)
+        return bool(t), (f"recovered {t!r}" if t
+                         else "no custom-title/ai-title entry in the newest transcript")
+
+    def bundles():
+        if not IS_MAC:
+            return True, "n/a off macOS"
+        found = []
+        for bid in (DESKTOP_BUNDLE, CLI_BUNDLE):
+            try:
+                r = subprocess.run(["/usr/bin/mdfind",
+                                    f"kMDItemCFBundleIdentifier == '{bid}'"],
+                                   capture_output=True, text=True, timeout=10)
+                if (r.stdout or "").strip():
+                    found.append(bid)
+            except Exception:
+                pass
+        return bool(found), f"resolved {len(found)}/2: {', '.join(found) or 'none'}"
+
+    def notifier():
+        if not IS_MAC:
+            return True, "n/a off macOS"
+        tn = _first_executable(TN_PATHS, "terminal-notifier")
+        if not tn:
+            return False, "terminal-notifier not installed - no click, no grouping"
+        stale = intel_only_notifier(tn)
+        if stale:
+            return False, f"{tn} is {stale}-only on Apple silicon"
+        return True, tn
+
+    check("session store readable", store)
+    check("record field names", fields)
+    check("deep-link contract", deep_link)
+    check("title recovery", titles)
+    check("bundle ids", bundles)
+    check("notifier binary", notifier)
+    return out
+
+
 def intel_only_notifier(binary):
     """Arch string if the notifier is Intel-only on Apple silicon, else None.
 
@@ -1023,6 +1137,171 @@ def intel_only_notifier(binary):
             continue
         return "x86_64" if "x86_64" in out and "arm64" not in out else None
     return None
+
+
+def _claude_cli():
+    """Absolute path to the claude CLI. launchd gets almost no PATH."""
+    return _first_executable(
+        (os.path.expanduser("~/.claude/local/claude"),
+         os.path.expanduser("~/.local/bin/claude"),
+         "/opt/homebrew/bin/claude", "/usr/local/bin/claude"), "claude")
+
+
+def maintain(quiet=True):
+    """Unattended upkeep: update, repair what is repairable, report what isn't.
+
+    Built to run from launchd, so it is deliberately boring. It stays SILENT
+    when everything is fine and speaks only when something changed or something
+    broke - a maintenance job that notifies on every run gets muted, and a muted
+    job is worse than none.
+
+    It never edits the desktop app's state. The only things it touches are its
+    own re-badge cache and the plugin install, both regenerable.
+    """
+    changed, problems = [], []
+
+    cli = _claude_cli()
+    if not cli:
+        problems.append("claude CLI not found; cannot check for updates")
+    else:
+        before = plugin_version()
+        for args in (["plugin", "marketplace", "update", "hancheng-ai"],
+                     ["plugin", "update", "cc-notify@hancheng-ai"]):
+            try:
+                subprocess.run([cli] + args, capture_output=True, text=True, timeout=180)
+            except Exception as e:
+                problems.append(f"{' '.join(args)} failed: {type(e).__name__}")
+        after = plugin_version()
+        if before and after and before != after:
+            changed.append(f"updated {before} -> {after}")
+
+    # A re-badge built from a since-replaced binary keeps its old architecture,
+    # which is how the Intel warning outlived its own fix. Rebuild rather than
+    # report: the cache is ours and regenerating it costs nothing.
+    if IS_MAC:
+        tn = _first_executable(TN_PATHS, "terminal-notifier")
+        ours = rebadged_notifier(tn) if tn else None
+        if tn and ours and intel_only_notifier(ours) and not intel_only_notifier(tn):
+            home = _rebadge_home()
+            if home and os.path.basename(home) == "notifier" and "cc-notify" in home:
+                shutil.rmtree(home, ignore_errors=True)
+                if rebadged_notifier(tn):
+                    changed.append("rebuilt the notifier for this architecture")
+
+    failures = [(n, d) for n, ok, d in check_assumptions() if not ok]
+    problems += [f"{n}: {d}" for n, d in failures]
+
+    for line in changed:
+        print(f"changed: {line}")
+    for line in problems:
+        print(f"PROBLEM: {line}")
+    if not changed and not problems:
+        print("nothing to do")
+
+    if not quiet and (changed or problems):
+        head = "cc-notify needs a look" if problems else "cc-notify updated itself"
+        body = "; ".join(problems or changed)[:180]
+        try:
+            notify(head, "maintenance", body, None, "cc-notify-maintenance")
+        except Exception:
+            pass
+    return 0
+
+
+MAINT_LABEL = "ai.hancheng.cc-notify.maintain"
+MAINT_LAUNCHER = os.path.expanduser("~/.local/bin/cc-notify-maintain")
+MAINT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{MAINT_LABEL}.plist")
+
+# The launcher resolves the newest installed copy at RUN time. Pointing launchd
+# straight at a plugin path would pin it to one version directory, and the first
+# self-update would leave the job running a copy that no longer exists - a
+# maintenance job that breaks on the very thing it maintains.
+_LAUNCHER = r'''#!/bin/bash
+# cc-notify maintenance launcher - installed by `notify.py --install-maintenance`
+root="$HOME/.claude/plugins/cache/hancheng-ai/cc-notify"
+newest=$(ls -1 "$root" 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+hook="$root/$newest/notify.py"
+[ -f "$hook" ] || hook="%(fallback)s"
+[ -f "$hook" ] || exit 0
+exec /usr/bin/python3 "$hook" --maintain --notify
+'''
+
+
+def install_maintenance(hour=10):
+    """Register a daily launchd job that runs maintain().
+
+    launchd rather than a Claude Code hook on purpose: upkeep should happen even
+    in the weeks you do not open Claude, and a hook that runs on every session
+    start would charge every session for work that matters once a day.
+    """
+    if not IS_MAC:
+        print("launchd is macOS-only; use cron elsewhere:")
+        print(f"  0 {hour} * * *  /usr/bin/python3 {os.path.abspath(__file__)} --maintain --notify")
+        return 1
+    os.makedirs(os.path.dirname(MAINT_LAUNCHER), exist_ok=True)
+    os.makedirs(os.path.dirname(MAINT_PLIST), exist_ok=True)
+    with open(MAINT_LAUNCHER, "w", encoding="utf-8") as f:
+        f.write(_LAUNCHER % {"fallback": os.path.abspath(__file__)})
+    os.chmod(MAINT_LAUNCHER, 0o755)
+
+    plist = {
+        "Label": MAINT_LABEL,
+        "ProgramArguments": [MAINT_LAUNCHER],
+        "StartCalendarInterval": [{"Hour": int(hour), "Minute": 17}],
+        "StandardOutPath": os.path.expanduser("~/.claude/.cache/cc-notify/maintain.log"),
+        "StandardErrorPath": os.path.expanduser("~/.claude/.cache/cc-notify/maintain.log"),
+        "ProcessType": "Background",
+    }
+    os.makedirs(os.path.dirname(plist["StandardOutPath"]), exist_ok=True)
+    with open(MAINT_PLIST, "wb") as f:
+        plistlib.dump(plist, f)
+
+    uid = os.getuid()
+    _run(["/bin/launchctl", "bootout", f"gui/{uid}/{MAINT_LABEL}"])  # ignore if absent
+    if not _run(["/bin/launchctl", "bootstrap", f"gui/{uid}", MAINT_PLIST]):
+        _run(["/bin/launchctl", "load", MAINT_PLIST])  # older macOS
+    print(f"Installed {MAINT_LABEL}: daily at {int(hour):02d}:17.")
+    print(f"  launcher : {MAINT_LAUNCHER}")
+    print(f"  plist    : {MAINT_PLIST}")
+    print(f"  log      : {plist['StandardOutPath']}")
+    print("It stays silent unless something changed or something broke.")
+    print("Run it now with:  cc-notify-maintain")
+    print(f"Remove it with :  python3 {os.path.basename(__file__)} --uninstall-maintenance")
+    return 0
+
+
+def uninstall_maintenance():
+    if not IS_MAC:
+        return 1
+    _run(["/bin/launchctl", "bootout", f"gui/{os.getuid()}/{MAINT_LABEL}"])
+    _run(["/bin/launchctl", "unload", MAINT_PLIST])
+    for p in (MAINT_PLIST, MAINT_LAUNCHER):
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    print(f"Removed {MAINT_LABEL}.")
+    return 0
+
+
+def plugin_version():
+    """Installed plugin version from the newest cached copy, or None."""
+    root = os.path.expanduser("~/.claude/plugins/cache/hancheng-ai/cc-notify")
+    best = None
+    try:
+        for name in os.listdir(root):
+            p = os.path.join(root, name, ".claude-plugin", "plugin.json")
+            if not os.path.isfile(p):
+                continue
+            try:
+                key = tuple(int(x) for x in name.split("."))
+            except ValueError:
+                continue
+            if best is None or key > best[0]:
+                best = (key, name)
+    except Exception:
+        return None
+    return best[1] if best else None
 
 
 def clear_banners():
@@ -1052,6 +1331,14 @@ def main():
         return self_test()
     if "--clear-banners" in sys.argv:
         return clear_banners()
+    if "--maintain" in sys.argv:
+        return maintain(quiet="--notify" not in sys.argv)
+    if "--install-maintenance" in sys.argv:
+        i = sys.argv.index("--install-maintenance")
+        hour = sys.argv[i + 1] if i + 1 < len(sys.argv) else "10"
+        return install_maintenance(hour if hour.isdigit() else "10")
+    if "--uninstall-maintenance" in sys.argv:
+        return uninstall_maintenance()
     if "--open" in sys.argv:
         i = sys.argv.index("--open")
         surface = None
