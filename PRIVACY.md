@@ -1,6 +1,6 @@
 # Privacy Policy — cc-notify
 
-_Last updated: 2026-07-27_
+_Last updated: 2026-07-29_
 
 **cc-notify collects nothing, transmits nothing, and contacts no server.**
 It is a local notification hook: it reads a small amount of local data in order
@@ -15,7 +15,7 @@ files that contain your work, and you deserve to know exactly which and why.
 |---|---|---|
 | `~/.claude/projects/**.jsonl` (your session transcripts) | The **last 512 KB** of the relevant file, and from it only `custom-title` and `ai-title` records | To title the notification with the session's name. Conversation content in the transcript is not parsed. |
 | The hook payload supplied by Claude Code | `session_id`, `transcript_path`, `cwd`, `permission_mode`, `message`, `last_assistant_message`, `error`, `background_tasks`, `stop_hook_active` | These are the fields Claude Code passes to any hook. They determine what the notification says. |
-| `~/Library/Application Support/Claude/claude-code-sessions/**.json` (macOS only) | One field: `lastFocusedAt` | To tell whether the session that fired is the one you are currently looking at, so it can stay quiet. These files hold no conversation content. |
+| `~/Library/Application Support/Claude/claude-code-sessions/**.json` (macOS only) | Five fields: `sessionId`, `cliSessionId`, `lastActivityAt`, `lastFocusedAt`, `isArchived` | Two jobs. `lastFocusedAt` tells whether the session that fired is the one you are looking at, so it can stay quiet. The rest resolve a click to the right session row, so clicking a banner opens that conversation instead of importing a duplicate of it. These files hold no conversation content, and titles found there are not read. |
 | The triggering application's `Info.plist` and icon (macOS only) | Bundle metadata and the `.icns` file | To give notifications an appropriate icon. |
 
 ## What appears on your screen
@@ -50,9 +50,16 @@ No logs, no history, no database, no cache of your conversations.
 
 ## What it runs
 
-`ps`, `lsappinfo`, `codesign`, `terminal-notifier` and `osascript` on macOS;
-`notify-send` on Linux; `powershell` on Windows. Every one is a local command,
-its output is discarded to `/dev/null`, and each has a timeout.
+`ps`, `lsappinfo`, `codesign`, `mdfind`, `open`, `terminal-notifier` and
+`osascript` on macOS; `notify-send` on Linux; `powershell` on Windows. Every one
+is a local command, its output is discarded to `/dev/null`, and each has a
+timeout.
+
+Clicking a notification runs one more: this same script, re-invoked as
+`notify.py --open <claude:// url>`. The click target is a command rather than a
+plain URL so the session lookup happens when you click, not when the banner was
+posted — a banner can sit in Notification Center for days. It only ever opens a
+`claude://` URL, validated against a fixed pattern first, and does nothing else.
 
 ## What it does not do
 
@@ -72,7 +79,8 @@ dependencies beyond the standard library.
 | Variable | Effect |
 |---|---|
 | `CC_NOTIFY_NO_TURN_END=1` | No turn-end notifications, so Claude's closing line is never displayed |
-| `CC_NOTIFY_NO_SUPPRESS=1` | Skip the focus check, so the session index is not consulted |
+| `CC_NOTIFY_NO_SUPPRESS=1` | Skip the focus check, so `lastFocusedAt` is not consulted |
+| `CC_NOTIFY_NO_DEEPLINK=1` | No click target, so the session index is not consulted to resolve one |
 | `CC_NOTIFY_NO_REBADGE=1` | Do not build the private notifier bundle |
 | `CC_NOTIFY_DRY_RUN=1` | Run every code path but display nothing |
 
