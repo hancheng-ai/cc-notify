@@ -184,21 +184,14 @@ assumptions
 The resolution percentage is the canary: it sat at 14% throughout the deep-link
 bug. A collapse there means the contract moved.
 
-To run that daily and self-update, unattended:
+Run it after a Claude Code update — that's when drift would otherwise be silent.
 
-```bash
-python3 ~/.claude/hooks/notify.py --install-maintenance
-```
-
-That registers a launchd job which updates the plugin, rebuilds the re-badge if
-its architecture no longer matches, re-checks the assumptions — and notifies you
-**only** when something changed or something broke. A maintenance job that pings
-you daily gets muted, and a muted job is worse than none. Remove it with
-`--uninstall-maintenance`.
-
-launchd rather than a Claude Code hook deliberately: upkeep should happen in the
-weeks you don't open Claude, and a session-start hook would charge every session
-for work that matters once a day.
+> **On automation:** the maintainer's copy of this repo has a launchd job that
+> runs those checks daily and self-updates the plugin. It is deliberately **not
+> shipped here**. Persistence plus code that fetches and runs newer versions of
+> itself is a malware signature to any automated safety screen, and no scanner
+> can take our word for the intent. Plugin users get the read-only half —
+> `--doctor` asserts the same assumptions and changes nothing.
 
 ### Turn it down
 

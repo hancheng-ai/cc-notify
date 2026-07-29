@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Developer-side upkeep (launchd job + self-update). Deliberately NOT published:
+# persistence plus network self-update is a malware signature to any automated
+# safety screen, and plugin users only need the read-only `--doctor` half.
+dev/
