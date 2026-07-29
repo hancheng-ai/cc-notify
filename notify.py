@@ -455,33 +455,22 @@ def desktop_target(session_id):
 
 
 def duplicate_pairs():
-    """Conversations that still show more than one row.
+    """Conversations still showing more than one row in the list.
 
-    Returns (cliSessionId, canonical_id_or_None, [live_other_ids]).
+    Returns (cliSessionId, [live_row_ids]).
 
-    An entry you archived is resolved and no longer counted - with one
-    asymmetry that matters. Archiving the CANONICAL entry does not stick, since
-    the next click un-archives it, so a pair stays outstanding as long as any
-    non-canonical entry is still live.
+    "More than one LIVE row" is the whole definition. An earlier version singled
+    out a canonical `local_<cli>` row and only counted the others, because back
+    when the click imported blindly, archiving that row did not stick - the next
+    click un-archived it. Clicks no longer un-archive anything, so archiving
+    either row now resolves the pair, and treating one of them as privileged
+    left a tidied conversation being reported as untidy for good.
     """
     by_cli = {}
     for sid, cli, d in desktop_records():
-        by_cli.setdefault(cli, []).append((sid, d))
-    pairs = []
-    for cli, entries in by_cli.items():
-        canonical = f"local_{cli}"
-        ids = [sid for sid, _ in entries]
-        if canonical not in ids:
-            # Only a natively-tracked entry exists. That is one row, not a
-            # duplicate - clicking would create the second, which is what
-            # desktop_target() answers.
-            continue
-        others = [sid for sid, d in entries
-                  if sid != canonical and not d.get("isArchived")]
-        if not others:
-            continue  # converged: everything but the canonical is archived
-        pairs.append((cli, canonical, others))
-    return pairs
+        if not d.get("isArchived"):
+            by_cli.setdefault(cli, []).append(sid)
+    return [(cli, sorted(rows)) for cli, rows in by_cli.items() if len(rows) > 1]
 
 
 def user_is_watching(session_id):
@@ -989,13 +978,13 @@ def doctor():
     print("longer do that: they resolve to a row that exists, or raise the app.\n")
     print("Nothing here breaks click-to-jump - the click lands on whichever of these")
     print("rows was active most recently. Tidy them if the duplicates bother you.\n")
-    for cli, canonical, others in pairs:
+    for cli, rows in pairs:
         landing = desktop_target(cli)
         print(f"conversation {cli}")
         print(f"  click lands on : local_{landing}" if landing else
               "  click lands on : nothing resolvable - raises the app")
-        for o in ([canonical] if canonical else []) + list(others):
-            if o and o != (f"local_{landing}" if landing else None):
+        for o in rows:
+            if o != (f"local_{landing}" if landing else None):
                 print(f"  also listed as : {o}")
         if landing:
             print(f"  tidy: keep local_{landing} - the one clicks land on - and archive")

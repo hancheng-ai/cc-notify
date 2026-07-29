@@ -510,13 +510,12 @@ class DuplicateSessionEntries(unittest.TestCase):
         N.desktop_records = lambda: [
             (p[0], p[1], {"isArchived": p[2] if len(p) > 2 else False}) for p in pairs]
 
-    def test_pairs_identify_canonical_and_extras(self):
+    def test_pairs_list_every_live_row(self):
         native = "local_deadbeef-0000-4000-8000-000000000000"
         self._records([(f"local_{UUID}", UUID), (native, UUID)])
-        (cli, canonical, others), = N.duplicate_pairs()
+        (cli, rows), = N.duplicate_pairs()
         self.assertEqual(cli, UUID)
-        self.assertEqual(canonical, f"local_{UUID}")
-        self.assertEqual(others, [native])
+        self.assertEqual(rows, sorted([f"local_{UUID}", native]))
 
     def test_single_entry_is_not_reported_as_a_pair(self):
         self._records([(f"local_{UUID}", UUID)])
@@ -528,11 +527,14 @@ class DuplicateSessionEntries(unittest.TestCase):
         self._records([(f"local_{UUID}", UUID, False), (native, UUID, True)])
         self.assertEqual(N.duplicate_pairs(), [])
 
-    def test_a_live_row_beside_an_archived_one_is_still_a_pair(self):
-        """Two rows are still two rows; --doctor should surface it."""
+    def test_archiving_the_local_uuid_row_also_resolves_the_pair(self):
+        """Either row may be the one you keep.
+
+        The old code privileged `local_<cli>` and never checked whether IT was
+        archived, so tidying in this direction left the pair reported for good."""
         native = "local_deadbeef-0000-4000-8000-000000000000"
         self._records([(f"local_{UUID}", UUID, True), (native, UUID, False)])
-        self.assertEqual(len(N.duplicate_pairs()), 1)
+        self.assertEqual(N.duplicate_pairs(), [])
 
     def test_a_lone_native_entry_is_not_a_duplicate(self):
         """One row is not a pair, whatever its id looks like."""
