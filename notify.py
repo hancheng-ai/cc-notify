@@ -270,6 +270,23 @@ def _source_notifier_app(tn_binary):
     return None
 
 
+def _source_stamp(tn_binary):
+    """Cheap identity of the binary a re-badge would be built from.
+
+    Path, size and mtime - enough to notice both "Homebrew replaced it" and
+    "this came from the other Homebrew prefix", which is the case that matters:
+    an Intel copy and an arm64 copy live at different paths.
+    """
+    src = _source_notifier_app(tn_binary)
+    if not src:
+        return None
+    try:
+        st = os.stat(os.path.join(src, "Contents", "MacOS", "terminal-notifier"))
+    except OSError:
+        return None
+    return {"src": src, "size": st.st_size, "mtime": int(st.st_mtime)}
+
+
 def rebadged_notifier(tn_binary):
     """Path to our own notifier binary, building it once if needed.
 
@@ -285,8 +302,22 @@ def rebadged_notifier(tn_binary):
         return None
     app = os.path.join(_rebadge_home(), "cc-notify.app")
     binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
+    stamp_path = os.path.join(_rebadge_home(), "source.json")
+    want = _source_stamp(tn_binary)
     if os.access(binary, os.X_OK):
-        return binary
+        # Reuse only if it still matches the binary it was copied FROM. A cache
+        # built from an Intel terminal-notifier keeps its architecture forever,
+        # so installing the arm64 build fixed nothing and macOS went on warning
+        # about an Intel component - under OUR name, since the re-badge puts our
+        # bundle id on it. Comparing a stamp is one stat plus a small read; no
+        # subprocess on the notification path.
+        try:
+            with open(stamp_path, encoding="utf-8") as f:
+                have = json.load(f)
+        except Exception:
+            have = None
+        if want is None or have == want:
+            return binary  # matches, or the source vanished and reuse is all we have
 
     src = _source_notifier_app(tn_binary)
     if not src:
@@ -320,6 +351,11 @@ def rebadged_notifier(tn_binary):
         subprocess.run([CODESIGN, "--force", "--deep", "--sign", "-", app],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        start_new_session=True, timeout=30)
+        # Record what it was built FROM, so a later run can tell whether this
+        # copy is still current instead of trusting that it exists.
+        if want is not None:
+            with open(stamp_path, "w", encoding="utf-8") as f:
+                json.dump(want, f)
     except Exception:
         return None
     return binary if os.access(binary, os.X_OK) else None
@@ -1101,6 +1137,10 @@ def check_assumptions():
         stale = intel_only_notifier(tn)
         if stale:
             return False, f"{tn} is {stale}-only on Apple silicon"
+        bad = stale_rebadges()
+        if bad:
+            return False, (f"{len(bad)} re-badged copy(ies) still Intel-only: "
+                           + ", ".join(b.replace(os.path.expanduser("~"), "~") for b in bad))
         return True, tn
 
     check("session store readable", store)
@@ -1110,6 +1150,41 @@ def check_assumptions():
     check("bundle ids", bundles)
     check("notifier binary", notifier)
     return out
+
+
+def all_rebadge_homes():
+    """Every directory a re-badge may live in, not just this run's.
+
+    _rebadge_home() honours CLAUDE_PLUGIN_DATA, which is set when the hook runs
+    inside Claude Code and unset when you run this file yourself. So there are
+    several caches, and checking only the current one means a developer-context
+    run reports on a copy the hook never uses - which is exactly how an Intel
+    re-badge survived being "fixed" and verified.
+    """
+    homes, seen = [], set()
+    cands = [_rebadge_home(), os.path.expanduser("~/.claude/.cache/cc-notify/notifier")]
+    data = os.path.expanduser("~/.claude/plugins/data")
+    try:
+        for name in os.listdir(data):
+            if "cc-notify" in name:
+                cands.append(os.path.join(data, name, "notifier"))
+    except OSError:
+        pass
+    for c in cands:
+        if c not in seen and os.path.isdir(c):
+            seen.add(c)
+            homes.append(c)
+    return homes
+
+
+def stale_rebadges():
+    """Re-badge copies that are Intel-only on Apple silicon, anywhere."""
+    bad = []
+    for home in all_rebadge_homes():
+        b = os.path.join(home, "cc-notify.app", "Contents", "MacOS", "terminal-notifier")
+        if os.path.exists(b) and intel_only_notifier(b):
+            bad.append(b)
+    return bad
 
 
 def intel_only_notifier(binary):

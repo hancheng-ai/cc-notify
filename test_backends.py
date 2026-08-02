@@ -191,6 +191,41 @@ class Assumptions(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class RebadgeCacheFreshness(unittest.TestCase):
+    """A cache built from the wrong binary must not be reused forever.
+
+    This is what let an Intel re-badge survive installing the arm64 build: the
+    copy existed, so it was reused, and its architecture never changed."""
+
+    def test_stamp_identifies_the_source_it_was_built_from(self):
+        st = N._source_stamp("/opt/homebrew/bin/terminal-notifier")
+        if st is None:
+            self.skipTest("terminal-notifier not installed here")
+        self.assertIn("src", st)
+        self.assertIn("size", st)
+        self.assertIn("mtime", st)
+
+    def test_the_two_homebrew_prefixes_stamp_differently(self):
+        """Intel and arm64 copies live at different paths, so the stamp differs
+        even when size and mtime happen to match."""
+        a = {"src": "/opt/homebrew/Cellar/terminal-notifier/2.0.0/terminal-notifier.app",
+             "size": 1, "mtime": 1}
+        b = {"src": "/usr/local/Cellar/terminal-notifier/2.0.0/terminal-notifier.app",
+             "size": 1, "mtime": 1}
+        self.assertNotEqual(a, b)
+
+    def test_every_rebadge_home_is_searched_not_just_this_run_s(self):
+        """CLAUDE_PLUGIN_DATA is set inside Claude Code and unset when you run
+        this file yourself, so checking only the current home reports on a copy
+        the hook never uses."""
+        if not N.IS_MAC:
+            self.skipTest("macOS only")
+        homes = N.all_rebadge_homes()
+        self.assertEqual(len(homes), len(set(homes)), "homes must be de-duplicated")
+        for h in homes:
+            self.assertTrue(h.endswith("notifier"), h)
+
+
 class NotifierSelection(unittest.TestCase):
     """A migrated Mac has BOTH Homebrew prefixes; the native one must win."""
 
