@@ -1,6 +1,6 @@
 # Privacy Policy — cc-notify
 
-_Last updated: 2026-07-29_
+_Last updated: 2026-08-04_
 
 **cc-notify collects nothing, transmits nothing, and contacts no server.**
 It is a local notification hook: it reads a small amount of local data in order
@@ -50,10 +50,20 @@ No logs, no history, no database, no cache of your conversations.
 
 ## What it runs
 
-`ps`, `lsappinfo`, `codesign`, `mdfind`, `open`, `terminal-notifier` and
-`osascript` on macOS; `notify-send` on Linux; `powershell` on Windows. Every one
-is a local command, its output is discarded to `/dev/null`, and each has a
-timeout.
+`ps`, `lsappinfo`, `codesign`, `mdfind`, `file`, `open`, `terminal-notifier`
+and `osascript` on macOS; `notify-send` on Linux; `powershell` on Windows. Every
+one is a local command invoked by absolute path, its output is discarded to
+`/dev/null`, and each has a timeout.
+
+`codesign` deserves a word, since re-signing a binary is the least ordinary
+thing here. macOS takes a notification's icon and its Notification Center group
+from the *sending* application, so every tool sharing one `terminal-notifier`
+looks identical. The fix is a private copy carrying our own bundle id, and
+editing a bundle invalidates its signature — macOS may then refuse to deliver
+at all. The copy is signed ad-hoc (`--sign -`), which is a local, identity-less
+signature: it grants no entitlements and asserts no developer identity. Nothing
+outside `~/.claude/` is signed, and `CC_NOTIFY_NO_REBADGE=1` skips the whole
+step.
 
 Clicking a notification runs one more: this same script, re-invoked as
 `notify.py --open <claude:// url>`. The click target is a command rather than a
