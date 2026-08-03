@@ -270,21 +270,35 @@ def _source_notifier_app(tn_binary):
     return None
 
 
-def _source_stamp(tn_binary):
-    """Cheap identity of the binary a re-badge would be built from.
+def _stat_id(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [st.st_size, int(st.st_mtime)]
 
-    Path, size and mtime - enough to notice both "Homebrew replaced it" and
-    "this came from the other Homebrew prefix", which is the case that matters:
-    an Intel copy and an arm64 copy live at different paths.
+
+def _source_stamp(tn_binary, built=None):
+    """Identity of the source a re-badge was built FROM, and of the copy itself.
+
+    Path, size and mtime of the source catch both "Homebrew replaced it" and
+    "this came from the other Homebrew prefix" - the case that matters, since
+    the Intel and arm64 builds live under different prefixes.
+
+    The copy's own size and mtime matter too, and for a reason that was
+    observed rather than imagined: an older version of this file rebuilds the
+    bundle without touching this stamp. Recording only the source would leave a
+    stale stamp vouching for a binary something else replaced, so a check that
+    exists to catch an Intel copy would certify one.
     """
     src = _source_notifier_app(tn_binary)
     if not src:
         return None
-    try:
-        st = os.stat(os.path.join(src, "Contents", "MacOS", "terminal-notifier"))
-    except OSError:
+    sid = _stat_id(os.path.join(src, "Contents", "MacOS", "terminal-notifier"))
+    if sid is None:
         return None
-    return {"src": src, "size": st.st_size, "mtime": int(st.st_mtime)}
+    return {"src": src, "size": sid[0], "mtime": sid[1],
+            "out": _stat_id(built) if built else None}
 
 
 def rebadged_notifier(tn_binary):
@@ -303,7 +317,7 @@ def rebadged_notifier(tn_binary):
     app = os.path.join(_rebadge_home(), "cc-notify.app")
     binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
     stamp_path = os.path.join(_rebadge_home(), "source.json")
-    want = _source_stamp(tn_binary)
+    want = _source_stamp(tn_binary, binary)
     if os.access(binary, os.X_OK):
         # Reuse only if it still matches the binary it was copied FROM. A cache
         # built from an Intel terminal-notifier keeps its architecture forever,
@@ -353,9 +367,10 @@ def rebadged_notifier(tn_binary):
                        start_new_session=True, timeout=30)
         # Record what it was built FROM, so a later run can tell whether this
         # copy is still current instead of trusting that it exists.
-        if want is not None:
+        final = _source_stamp(tn_binary, binary)
+        if final is not None:
             with open(stamp_path, "w", encoding="utf-8") as f:
-                json.dump(want, f)
+                json.dump(final, f)
     except Exception:
         return None
     return binary if os.access(binary, os.X_OK) else None
