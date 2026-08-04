@@ -255,9 +255,21 @@ REBADGE_ID = "ai.hancheng.cc-notify"
 CODESIGN = "/usr/bin/codesign"
 
 
-def _rebadge_home():
+# A calling tool gets its OWN bundle id, not a shared one. macOS groups
+# Notification Center by sending bundle, so routing another tool through a
+# shared identity would pile its banners in with "session needs your
+# permission" - which is the exact problem this exists to solve. Per-caller
+# badging costs one ~1.2 MB copy, built once and cached.
+BADGE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
+
+
+def _badge_id(badge):
+    return REBADGE_ID if not badge else f"{REBADGE_ID}.{badge}"
+
+
+def _rebadge_home(badge=None):
     base = os.environ.get("CLAUDE_PLUGIN_DATA") or os.path.expanduser("~/.claude/.cache/cc-notify")
-    return os.path.join(base, "notifier")
+    return os.path.join(base, "notifier" if not badge else f"notifier-{badge}")
 
 
 def _source_notifier_app(tn_binary):
@@ -301,8 +313,11 @@ def _source_stamp(tn_binary, built=None):
             "out": _stat_id(built) if built else None}
 
 
-def rebadged_notifier(tn_binary):
-    """Path to our own notifier binary, building it once if needed.
+def rebadged_notifier(tn_binary, badge=None):
+    """Path to a re-badged notifier binary, building it once if needed.
+
+    `badge` gives a calling tool its own bundle id and its own Notification
+    Center group. None is cc-notify's own identity, used by the hook path.
 
     Returns None on any problem, so the caller simply falls back to the shared
     terminal-notifier - a wrong icon is much better than no notification.
@@ -314,9 +329,10 @@ def rebadged_notifier(tn_binary):
     # tells you to try.
     if not IS_MAC or os.environ.get("CC_NOTIFY_NO_REBADGE"):
         return None
-    app = os.path.join(_rebadge_home(), "cc-notify.app")
+    home = _rebadge_home(badge)
+    app = os.path.join(home, "cc-notify.app")
     binary = os.path.join(app, "Contents", "MacOS", "terminal-notifier")
-    stamp_path = os.path.join(_rebadge_home(), "source.json")
+    stamp_path = os.path.join(home, "source.json")
     want = _source_stamp(tn_binary, binary)
     if os.access(binary, os.X_OK):
         # Reuse only if it still matches the binary it was copied FROM. A cache
@@ -337,7 +353,7 @@ def rebadged_notifier(tn_binary):
     if not src:
         return None
     try:
-        os.makedirs(_rebadge_home(), exist_ok=True)
+        os.makedirs(home, exist_ok=True)
         if os.path.isdir(app):
             shutil.rmtree(app)
         shutil.copytree(src, app, symlinks=True)
@@ -345,8 +361,10 @@ def rebadged_notifier(tn_binary):
         plist = os.path.join(app, "Contents", "Info.plist")
         with open(plist, "rb") as f:
             info = plistlib.load(f)
-        info["CFBundleIdentifier"] = REBADGE_ID
-        info["CFBundleName"] = "cc-notify"
+        info["CFBundleIdentifier"] = _badge_id(badge)
+        # The displayed name comes from here, so a caller's banners say
+        # its name rather than ours.
+        info["CFBundleName"] = badge or "cc-notify"
         icon_name = info.get("CFBundleIconFile") or "Terminal"
         if not icon_name.endswith(".icns"):
             icon_name += ".icns"
@@ -356,7 +374,11 @@ def rebadged_notifier(tn_binary):
         # Wear the icon of whatever launched the session, so the banner looks
         # like what it is about. Sourced from the local machine at runtime and
         # never redistributed.
-        icns = trigger_app_icns()
+        # Only for our own badge. Process ancestry names whatever launched
+        # THIS run, which for a nightly cron caller is a shell, not the
+        # tool - so a caller keeps terminal-notifier's own icon and is
+        # distinguished by bundle id and name instead.
+        icns = trigger_app_icns() if not badge else None
         if icns:
             shutil.copyfile(icns, os.path.join(app, "Contents", "Resources", icon_name))
 
@@ -644,6 +666,70 @@ def open_url(url, surface=None):
     return 0
 
 
+def send_click_command(spec):
+    """Shell command a --send banner runs on click.
+
+    Same rule as the hook path: resolve at click time, never freeze an answer
+    into a delivered artifact. A brief regenerated since the banner was posted
+    opens as it is NOW, and one that has since been deleted does nothing rather
+    than raising a visible error at someone who only clicked a notification.
+    """
+    py = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+    return "{} {} --open-target {}".format(
+        shlex.quote(py), shlex.quote(os.path.abspath(__file__)), shlex.quote(spec))
+
+
+def open_target(spec):
+    """Click handler for --send. Opens a local file or an http(s) URL, or nothing.
+
+    Deliberately narrow. This runs from a delivered notification, so it must
+    never become a general-purpose opener for whatever string was passed days
+    earlier: no custom schemes, no arguments, and a local path has to still
+    exist and still be a regular file.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return 0
+    argv = None
+    if re.match(r"^https?://[^\s]+$", spec):
+        argv = ["/usr/bin/open", spec]
+    else:
+        path = spec[7:] if spec.startswith("file://") else spec
+        try:
+            path = os.path.abspath(os.path.expanduser(unquote_path(path)))
+            if os.path.isfile(path):
+                argv = ["/usr/bin/open", path]
+        except Exception:
+            argv = None
+    if argv is None:
+        return 0  # gone, or not a shape we open: silence beats a visible error
+    try:
+        subprocess.run(argv, timeout=10, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    return 0
+
+
+def unquote_path(p):
+    """Percent-decode a file:// path without importing urllib for one call."""
+    return re.sub(r"%([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), p)
+
+
+def macos_send_argv(tn, title, msg, spec, group):
+    """terminal-notifier invocation for a caller's banner.
+
+    No subtitle: a caller supplies its own two fields and inventing a third
+    from our side would only add noise.
+    """
+    argv = [tn, "-title", title, "-message", msg]
+    if spec:
+        argv += ["-execute", send_click_command(spec)]
+    if group:
+        argv += ["-group", group]
+    return argv
+
+
 def macos_argv(tn, title, sub, msg, url, group):
     """terminal-notifier invocation. Click-to-jump and grouping both supported.
 
@@ -790,6 +876,59 @@ def notify(title, sub, msg, url, group):
             _run([ps, "-NoProfile", "-NonInteractive", "-Command",
                   windows_script(title, sub, msg, url, group)])
         return
+
+
+def send(title, message, spec=None, badge=None):
+    """Deliver one banner on behalf of another local tool. True iff delivered.
+
+    The importable half of `--send`. The return value is the contract: callers
+    fall back to their own sink on False, so reporting success for a banner
+    that never appeared is the one outcome worse than the bare notifier this
+    replaces. Every backend is therefore checked, not fired and forgotten.
+
+    Raises nothing. A caller may be capturing our output into a log it later
+    shows a user, so no traceback is allowed to reach stdout or stderr.
+    """
+    try:
+        title = str(title or "").strip()[:64]
+        message = str(message or "").strip()[:180]
+        if not message:
+            return False
+        if badge is not None and not BADGE_RE.match(str(badge)):
+            badge = None  # unusable name: fall back to our identity, still deliver
+        group = f"cc-notify-send-{badge}" if badge else "cc-notify-send"
+
+        if IS_MAC:
+            tn = _first_executable(TN_PATHS, "terminal-notifier")
+            if tn:
+                # Try the caller's own identity first, then ours, then the
+                # shared binary. A bundle id macOS has never authorized fails
+                # SILENTLY, so each rung has to be checked rather than assumed.
+                for binary in (rebadged_notifier(tn, badge), rebadged_notifier(tn), tn):
+                    if binary and _run(macos_send_argv(binary, title, message, spec, group)):
+                        return True
+            return _run(applescript_argv(title, "", message))
+
+        if IS_LINUX:
+            ns = _first_executable(NOTIFY_SEND_PATHS, "notify-send")
+            return bool(ns) and _run(linux_argv(ns, title, "", message, group))
+
+        if IS_WIN:
+            ps = _first_executable(POWERSHELL_PATHS, "powershell", "pwsh")
+            return bool(ps) and _run([ps, "-NoProfile", "-NonInteractive", "-Command",
+                                      windows_script(title, "", message, spec, group)])
+        return False
+    except Exception:
+        return False
+
+
+def _argv_value(flag):
+    """Value following `flag` in argv, or None. Values are never shell-parsed."""
+    try:
+        i = sys.argv.index(flag)
+    except ValueError:
+        return None
+    return sys.argv[i + 1] if i + 1 < len(sys.argv) else None
 
 
 def deep_link_supported():
@@ -1177,16 +1316,26 @@ def all_rebadge_homes():
     re-badge survived being "fixed" and verified.
     """
     homes, seen = [], set()
-    cands = [_rebadge_home(), os.path.expanduser("~/.claude/.cache/cc-notify/notifier")]
+    cands = [_rebadge_home()]
+    cache = os.path.expanduser("~/.claude/.cache/cc-notify")
+    try:
+        cands += [os.path.join(cache, n) for n in os.listdir(cache)
+                  if n == "notifier" or n.startswith("notifier-")]
+    except OSError:
+        pass
     data = os.path.expanduser("~/.claude/plugins/data")
     try:
         for name in os.listdir(data):
-            if "cc-notify" in name:
-                cands.append(os.path.join(data, name, "notifier"))
+            if "cc-notify" not in name:
+                continue
+            base = os.path.join(data, name)
+            for sub in os.listdir(base):
+                if sub == "notifier" or sub.startswith("notifier-"):
+                    cands.append(os.path.join(base, sub))
     except OSError:
         pass
     for c in cands:
-        if c not in seen and os.path.isdir(c):
+        if c not in seen and os.path.isdir(c):  # noqa: SIM102
             seen.add(c)
             homes.append(c)
     return homes
@@ -1256,6 +1405,13 @@ def main():
         return self_test()
     if "--clear-banners" in sys.argv:
         return clear_banners()
+    if "--send" in sys.argv:
+        # stdin is not read here. Exit code is the caller's fallback signal:
+        # 0 only if a banner was actually delivered.
+        return 0 if send(_argv_value("--title"), _argv_value("--message"),
+                         _argv_value("--open"), _argv_value("--badge")) else 1
+    if "--open-target" in sys.argv:
+        return open_target(_argv_value("--open-target"))
     if "--open" in sys.argv:
         i = sys.argv.index("--open")
         surface = None

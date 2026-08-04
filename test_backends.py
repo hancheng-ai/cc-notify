@@ -223,7 +223,133 @@ class RebadgeCacheFreshness(unittest.TestCase):
         homes = N.all_rebadge_homes()
         self.assertEqual(len(homes), len(set(homes)), "homes must be de-duplicated")
         for h in homes:
-            self.assertTrue(h.endswith("notifier"), h)
+            base = os.path.basename(h)
+            # "notifier" is ours; "notifier-<badge>" belongs to a --send caller,
+            # and its copies need checking for staleness just as much.
+            self.assertTrue(base == "notifier" or base.startswith("notifier-"), h)
+
+
+class SendMode(unittest.TestCase):
+    """--send: one banner on behalf of another local tool."""
+
+    def setUp(self):
+        self._run, self._first = N._run, N._first_executable
+        self.addCleanup(setattr, N, "_run", self._run)
+        self.addCleanup(setattr, N, "_first_executable", self._first)
+        self._plat = (N.IS_MAC, N.IS_WIN, N.IS_LINUX)
+        self.addCleanup(lambda: setattr_all(N, self._plat))
+        self.sent = []
+
+    def _ok(self, argv, **kw):
+        self.sent.append(argv); return True
+
+    def test_delivery_failure_is_reported_not_swallowed(self):
+        """The exit code is the caller's fallback signal. Claiming success for a
+        banner that never appeared is worse than the bare notifier it replaces."""
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        N._first_executable = lambda paths, *names: None
+        N._run = lambda argv, **kw: False
+        self.assertFalse(N.send("t", "m"))
+
+    def test_it_never_raises(self):
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        def boom(*a, **k): raise RuntimeError("backend exploded")
+        N._first_executable = boom
+        self.assertFalse(N.send("t", "m"))
+
+    def test_empty_message_is_not_a_banner(self):
+        self.assertFalse(N.send("title", "   "))
+
+    def test_a_caller_gets_its_own_bundle_id(self):
+        """The whole point: distinct sender means a distinct Notification Center
+        group. Sharing ours would pile a nightly brief in with permission
+        prompts."""
+        self.assertEqual(N._badge_id(None), N.REBADGE_ID)
+        self.assertEqual(N._badge_id("nextbrief"), N.REBADGE_ID + ".nextbrief")
+        self.assertNotEqual(N._badge_id("nextbrief"), N._badge_id(None))
+
+    def test_each_badge_gets_its_own_cache(self):
+        self.assertNotEqual(N._rebadge_home("nextbrief"), N._rebadge_home())
+
+    def test_hostile_badge_names_are_refused(self):
+        """The badge reaches both a bundle id and a filesystem path."""
+        for bad in ("../../etc", "a b", "Upper", "x" * 40, "a;rm -rf /", "",
+                    "a/b", ".hidden", "-lead"):
+            self.assertIsNone(N.BADGE_RE.match(bad), bad)
+        for good in ("nextbrief", "a", "my-tool-2"):
+            self.assertIsNotNone(N.BADGE_RE.match(good), good)
+
+    def test_an_unusable_badge_still_delivers_under_our_identity(self):
+        N.IS_MAC, N.IS_WIN, N.IS_LINUX = True, False, False
+        N._first_executable = lambda paths, *names: "/tn"
+        N._run = self._ok
+        self.assertTrue(N.send("t", "m", badge="../evil"))
+
+    def test_values_are_argv_entries_not_script_text(self):
+        """Caller message text is hostile by construction - it is assembled from
+        files the caller only reads."""
+        argv = N.macos_send_argv("/tn", "T", "m; rm -rf / `id`", None, "g")
+        self.assertIn("m; rm -rf / `id`", argv)
+        self.assertEqual(argv[argv.index("-message") + 1], "m; rm -rf / `id`")
+
+    def test_no_subtitle_is_invented_for_a_caller(self):
+        self.assertNotIn("-subtitle", N.macos_send_argv("/tn", "T", "m", None, "g"))
+
+    def test_click_is_wired_late_not_frozen(self):
+        argv = N.macos_send_argv("/tn", "T", "m", "/tmp/BRIEF.html", "g")
+        self.assertNotIn("-open", argv)
+        self.assertIn("-execute", argv)
+        self.assertIn("--open-target", argv[argv.index("-execute") + 1])
+
+    def test_click_command_quotes_its_argument(self):
+        cmd = N.send_click_command("/tmp/a b'c;d.html")
+        self.assertIn("'/tmp/a b'\"'\"'c;d.html'", cmd)
+
+    def test_linux_and_windows_report_delivery_too(self):
+        for plat in ((False, False, True), (False, True, False)):
+            N.IS_MAC, N.IS_WIN, N.IS_LINUX = plat
+            N._first_executable = lambda paths, *names: None
+            self.assertFalse(N.send("t", "m"))
+            N._first_executable = lambda paths, *names: "/backend"
+            N._run = lambda argv, **kw: True
+            self.assertTrue(N.send("t", "m"))
+
+
+class SendClickTarget(unittest.TestCase):
+    """Resolved when clicked, so a regenerated file opens as it is now."""
+
+    def setUp(self):
+        self._real = N.subprocess.run
+        self.addCleanup(setattr, N.subprocess, "run", self._real)
+        self.seen = []
+        N.subprocess.run = lambda argv, **kw: self.seen.append(argv)
+
+    def click(self, spec):
+        self.seen.clear(); N.open_target(spec)
+        return self.seen[0] if self.seen else None
+
+    def test_existing_file_opens(self):
+        import tempfile, os as _os
+        with tempfile.TemporaryDirectory() as d:
+            f = _os.path.join(d, "BRIEF.html")
+            open(f, "w").close()
+            self.assertEqual(self.click(f), ["/usr/bin/open", f])
+            self.assertEqual(self.click("file://" + f), ["/usr/bin/open", f])
+
+    def test_a_vanished_file_does_nothing_visible(self):
+        self.assertIsNone(self.click("/nonexistent/BRIEF.html"))
+
+    def test_a_directory_is_not_a_target(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(self.click(d))
+
+    def test_only_http_s_and_local_files(self):
+        for hostile in ("javascript:alert(1)", "ftp://h/f", "; rm -rf /",
+                        "claude://resume?session=x", "", "   "):
+            self.assertIsNone(self.click(hostile), hostile)
+        self.assertEqual(self.click("https://example.com/x"),
+                         ["/usr/bin/open", "https://example.com/x"])
 
 
 class NotifierSelection(unittest.TestCase):

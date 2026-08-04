@@ -160,6 +160,42 @@ rewritten. Clear them once:
 python3 ~/.claude/hooks/notify.py --clear-banners
 ```
 
+### Send a notification from another tool
+
+Other local tools can post through cc-notify instead of shelling out to a bare
+`terminal-notifier`, where every sender shares one identity
+(`fr.julienxx.oss.terminal-notifier`) and lands in one undifferentiated
+Notification Center group.
+
+```bash
+python3 ~/.claude/hooks/notify.py --send \
+  --title "nextbrief" --message "Nightly brief ready — 7 items" \
+  --badge nextbrief --open ~/nextbrief/BRIEF.html
+```
+
+| | |
+|---|---|
+| `--title` / `--message` | the banner. Passed as argv, never interpolated into a script — caller text is assumed hostile |
+| `--badge NAME` | the caller's own identity, so its banners group separately. `[a-z0-9][a-z0-9-]{0,31}`; omit to share cc-notify's |
+| `--open URL_OR_PATH` | click target: a local file, or an `http(s)` URL |
+
+**Exit status is the contract: `0` only if a banner was actually delivered**, so
+a caller can fall back to its own sink on anything else. It reads no stdin,
+never blocks, and never raises — a caller may be capturing output into a log it
+later shows a user.
+
+`--badge` gives that tool its own bundle id (`ai.hancheng.cc-notify.<name>`) and
+its own cached notifier copy, ~1.2 MB, built once. That is the whole point:
+sharing one identity would pile a nightly brief in with *"session needs your
+permission"*, which is the problem this is meant to solve. If the caller's
+identity fails to deliver, it falls back to cc-notify's, then to the shared
+binary, then to `osascript` — each rung checked rather than assumed, because an
+unauthorized bundle id fails **silently**.
+
+The click resolves when clicked, not when posted: a brief regenerated since the
+banner opens as it is *now*, and one since deleted does nothing rather than
+raising an error at someone who only clicked a notification.
+
 ### Keep it working
 
 Everything this plugin depends on is undocumented and can change without
