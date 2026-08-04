@@ -81,7 +81,38 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 # exactly how this was found.
 _TN_BREW = ("/opt/homebrew/bin/terminal-notifier",   # Homebrew on Apple silicon
             "/usr/local/bin/terminal-notifier")      # Homebrew on Intel
-TN_PATHS = _TN_BREW if (IS_MAC and os.uname().machine == "arm64") else _TN_BREW[::-1]
+
+_HOST_ARM64 = None
+
+
+def host_is_arm64():
+    """True on Apple silicon, INCLUDING when this process is translated.
+
+    os.uname().machine reports the architecture of the PROCESS, not the
+    machine. Run under Rosetta it answers "x86_64" on an M-series Mac, which
+    silently flips the prefix order below back to Intel-first - reintroducing
+    the exact bug that ordering exists to prevent, in precisely the contexts
+    hardest to observe. sysctl.proc_translated is the difference between "this
+    process is x86_64" and "this computer is x86_64".
+
+    Costs nothing on a native arm64 run: uname already answers, and the sysctl
+    is consulted only when uname claims Intel.
+    """
+    global _HOST_ARM64
+    if _HOST_ARM64 is None:
+        m = os.uname().machine if IS_MAC else ""
+        if m == "x86_64":
+            try:
+                out = subprocess.run(["/usr/sbin/sysctl", "-n", "sysctl.proc_translated"],
+                                     capture_output=True, text=True, timeout=5).stdout
+                m = "arm64" if out.strip() == "1" else m
+            except Exception:
+                pass
+        _HOST_ARM64 = (m == "arm64")
+    return _HOST_ARM64
+
+
+TN_PATHS = _TN_BREW if (IS_MAC and host_is_arm64()) else _TN_BREW[::-1]
 NOTIFY_SEND_PATHS = ("/usr/bin/notify-send", "/usr/local/bin/notify-send")
 POWERSHELL_PATHS = (r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",)
 MAC_PS = "/bin/ps"
@@ -1282,6 +1313,18 @@ def check_assumptions():
                 pass
         return bool(found), f"resolved {len(found)}/2: {', '.join(found) or 'none'}"
 
+    def arch():
+        if not IS_MAC:
+            return True, "n/a off macOS"
+        proc = os.uname().machine
+        host = "arm64" if host_is_arm64() else proc
+        if proc != host:
+            # Not a failure - the point is that it is VISIBLE. A translated hook
+            # reporting x86_64 is what silently flipped prefix selection back to
+            # Intel and undid the fix for it, three times.
+            return True, f"process {proc} under Rosetta, host {host} (prefix order follows host)"
+        return True, f"process and host both {host}"
+
     def notifier():
         if not IS_MAC:
             return True, "n/a off macOS"
@@ -1302,6 +1345,7 @@ def check_assumptions():
     check("deep-link contract", deep_link)
     check("title recovery", titles)
     check("bundle ids", bundles)
+    check("architecture", arch)
     check("notifier binary", notifier)
     return out
 
@@ -1359,7 +1403,7 @@ def intel_only_notifier(binary):
     "Support Ending for Intel-based Apps" warning says cc-notify. The binary is
     Homebrew's and we never rebuild it - only an arm64 Homebrew fixes this.
     """
-    if not IS_MAC or not binary or os.uname().machine != "arm64":
+    if not IS_MAC or not binary or not host_is_arm64():
         return None
     # A Homebrew shim is a shell script; the Mach-O lives inside the .app.
     real = os.path.realpath(binary)

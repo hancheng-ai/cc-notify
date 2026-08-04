@@ -1,7 +1,7 @@
 {
   "name": "cc-notify",
   "description": "Desktop notifications that tell you which Claude Code session needs you, and take you there when clicked. Each banner is titled with the session's own name, shows its repo and permission mode, and reports what happened - Claude's closing line when a turn finishes, the error when one fails. Each session keeps one live banner instead of stacking, and the session you are currently watching stays quiet. macOS, Linux and Windows; Python standard library only; no model context cost.",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "author": {
     "name": "Hancheng Wang"
   },

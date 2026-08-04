@@ -191,6 +191,69 @@ class Assumptions(unittest.TestCase):
         self.assertFalse(ok)
 
 
+class HostArchitecture(unittest.TestCase):
+    """uname reports the PROCESS architecture, not the machine's."""
+
+    def setUp(self):
+        self._cached = N._HOST_ARM64
+        self.addCleanup(setattr, N, "_HOST_ARM64", self._cached)
+
+    def test_a_translated_process_still_resolves_to_arm64(self):
+        """Under Rosetta uname says x86_64 on an M-series Mac. Believing it
+        flips the Homebrew prefix order back to Intel-first, which silently
+        undoes the arm64 fix in exactly the contexts hardest to observe."""
+        if not N.IS_MAC:
+            self.skipTest("macOS only")
+        N._HOST_ARM64 = None
+        real = N.subprocess.run
+        self.addCleanup(setattr, N.subprocess, "run", real)
+
+        class R:
+            stdout = "1\n"        # sysctl.proc_translated == 1
+        N.subprocess.run = lambda *a, **k: R()
+        real_uname = os.uname
+        try:
+            os.uname = lambda: type("U", (), {"machine": "x86_64"})()
+            self.assertTrue(N.host_is_arm64())
+        finally:
+            os.uname = real_uname
+
+    def test_a_genuine_intel_mac_is_not_mistaken_for_arm(self):
+        if not N.IS_MAC:
+            self.skipTest("macOS only")
+        N._HOST_ARM64 = None
+        real = N.subprocess.run
+        self.addCleanup(setattr, N.subprocess, "run", real)
+
+        class R:
+            stdout = "0\n"        # not translated: really an Intel Mac
+        N.subprocess.run = lambda *a, **k: R()
+        real_uname = os.uname
+        try:
+            os.uname = lambda: type("U", (), {"machine": "x86_64"})()
+            self.assertFalse(N.host_is_arm64())
+        finally:
+            os.uname = real_uname
+
+    def test_native_arm64_never_shells_out(self):
+        """The sysctl is consulted only when uname claims Intel, so a native
+        run pays nothing on the notification path."""
+        if not N.IS_MAC:
+            self.skipTest("macOS only")
+        N._HOST_ARM64 = None
+        called = []
+        real = N.subprocess.run
+        self.addCleanup(setattr, N.subprocess, "run", real)
+        N.subprocess.run = lambda *a, **k: called.append(a) or real(*a, **k)
+        real_uname = os.uname
+        try:
+            os.uname = lambda: type("U", (), {"machine": "arm64"})()
+            self.assertTrue(N.host_is_arm64())
+            self.assertEqual(called, [])
+        finally:
+            os.uname = real_uname
+
+
 class RebadgeCacheFreshness(unittest.TestCase):
     """A cache built from the wrong binary must not be reused forever.
 

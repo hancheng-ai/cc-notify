@@ -258,6 +258,94 @@ for example only permission prompts and idle prompts:
 Available types include `permission_prompt`, `idle_prompt`, `auth_success`,
 `elicitation_dialog`, `agent_needs_input` and `agent_completed`.
 
+## Changelog
+
+Dates are the publish date of each release. Newest first.
+
+### 1.18.0 — 2026-08-04
+- **Architecture detection no longer trusts a translated `uname`.** Under Rosetta
+  `os.uname().machine` reports `x86_64` on an Apple silicon Mac, which flipped
+  Homebrew prefix selection back to Intel-first and silently undid the 1.10.0
+  fix. `sysctl.proc_translated` distinguishes "this process is x86_64" from
+  "this computer is x86_64". Measured translated: 1.16.0 picks `/usr/local`,
+  1.18.0 picks `/opt/homebrew`.
+- `--doctor` reports process vs host architecture, so translation is visible.
+
+### 1.17.0 — 2026-08-04
+- **`--send`**: other local tools can post a banner through cc-notify instead of
+  a bare `terminal-notifier`. `--badge NAME` gives a caller its own bundle id and
+  its own Notification Center group. Exit status is the contract — `0` only if a
+  banner was actually delivered.
+- Click targets for `--send` resolve when clicked, so a regenerated file opens as
+  it is now and a deleted one does nothing.
+
+### 1.16.0 — 2026-08-04
+- The re-badge stamp covers the built copy, not only its source, so an external
+  rewrite invalidates it.
+
+### 1.15.0 — 2026-08-02
+- The re-badged notifier is rebuilt when its source changes. A copy built from an
+  Intel binary was previously reused forever, so installing the arm64 build fixed
+  nothing.
+- `--doctor` checks every re-badge cache, not just the one the current
+  environment resolves to.
+
+### 1.14.0 — 2026-07-29
+- The maintenance job (launchd + self-update) is no longer published. Persistence
+  plus network self-update reads as a malware signature to automated screening,
+  and it only ever served the maintainer.
+
+### 1.13.0 — 2026-07-29
+- `--doctor` asserts the six undocumented interfaces this plugin depends on
+  against live data, with a resolution-rate canary.
+
+### 1.12.0 — 2026-07-29
+- A conversation counts as duplicated only while more than one row is live, so
+  tidying up is no longer reported as untidy forever.
+
+### 1.11.0 — 2026-07-29
+- A click can no longer raise: timestamps are type-guarded and resolution runs
+  inside the guard, falling back to raising the app.
+- Removed dead code; `--doctor` stops recommending the row clicks land on.
+
+### 1.10.0 — 2026-07-29
+- The native Homebrew prefix is searched first, so an Apple silicon Mac with a
+  leftover Intel Homebrew gets the arm64 notifier.
+
+### 1.9.0 — 2026-07-29
+- **Clicks resolve to the desktop row, not the CLI session.** `claude://resume`
+  takes a desktop row's own id; the two matched for only 6 of 44 conversations,
+  and the rest never navigated. 41 of 44 resolve now.
+
+### 1.8.0 — 2026-07-28
+- Sessions hosted in a terminal raise that terminal instead of importing a copy
+  into the desktop app.
+
+### 1.7.0 — 2026-07-28
+- The click is resolved when clicked (`-execute`), not frozen when posted, so a
+  banner that has outlived its state still routes correctly.
+- `--clear-banners` removes delivered banners carrying a stale baked-in link.
+
+### 1.6.0 — 2026-07-28
+- Withheld the click target where following it would add a session row.
+  *(Superseded by 1.9.0, which fixed the underlying id mismatch instead.)*
+
+### 1.5.0 / 1.5.1 — 2026-07-27 / 2026-07-28
+- The re-badged identity is the default again, with `--doctor` owning its failure
+  mode. `--doctor` learned which duplicate pairs are still outstanding.
+
+### 1.4.0 – 1.4.2 — 2026-07-27
+- `--doctor` for duplicate session entries; `CC_NOTIFY_NO_DEEPLINK` opt-out.
+
+### 1.3.0 – 1.3.2 — 2026-07-27
+- Notifications post under their own bundle id and icon rather than pooling with
+  every other `terminal-notifier` user.
+- Fixed a hang that could outlast its own timeout.
+
+### 1.1.0 – 1.2.1 — 2026-07-27
+- First releases: session-titled banners, per-session grouping, turn-end and
+  turn-failure events, click-to-jump, Linux and Windows backends.
+
 ## Privacy
 
 Full policy: [PRIVACY.md](PRIVACY.md). In short — everything is local, and it is
